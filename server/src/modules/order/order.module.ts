@@ -11,6 +11,7 @@ import { Invoice } from '../../entities/finance.entity';
 import { Archive, Feedback } from '../../entities/archive.entity';
 import { User } from '../../entities/user.entity';
 import { MealTopUp } from '../../entities/topup.entity';
+import { SpoiledReport } from '../../entities/spoiled.entity';
 import { OrderService } from './order.service';
 import { OrderController } from './order.controller';
 import { PlanService } from './plan.service';
@@ -19,7 +20,7 @@ import { PlanService } from './plan.service';
   imports: [TypeOrmModule.forFeature([
     MealOrder, MealPlan, Enterprise, Contract, Store, StoreShift,
     Product, InventoryBatch, Delivery, Incident, IncidentLog,
-    Invoice, Archive, Feedback, User, MealTopUp,
+    Invoice, Archive, Feedback, User, MealTopUp, SpoiledReport,
   ])],
   providers: [OrderService, PlanService],
   controllers: [OrderController],

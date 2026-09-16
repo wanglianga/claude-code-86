@@ -58,6 +58,42 @@
       </el-table>
     </div>
 
+    <div class="panel" v-if="redeliveries.length" style="margin-bottom:14px">
+      <div class="panel-title">
+        变质餐食补送任务
+        <el-tag size="small" type="danger" effect="dark" style="margin-left:6px">优先配送</el-tag>
+      </div>
+      <el-table :data="redeliveries" size="small" border>
+        <el-table-column prop="redeliveryNo" label="补送单" width="140" class-name="mono" />
+        <el-table-column label="补送商品" min-width="200">
+          <template #default="{ row }">{{ row.items.map((i:any)=>`${i.name}×${i.quantity}`).join('，') }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="120">
+          <template #default="{ row }">
+            <el-tag size="small" :type="REDELIVERY_STATUS[row.status]?.type as any">{{ REDELIVERY_STATUS[row.status]?.name }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="240" align="center">
+          <template #default="{ row }">
+            <el-button v-if="row.status==='READY'" size="small" type="primary" @click="rdPickup(row)">取货补送</el-button>
+            <el-button v-if="row.status==='PICKED'" size="small" type="success" @click="openDeliver(row)">确认送达</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <el-dialog v-model="rdDeliverVisible" title="补送送达确认" width="420px">
+      <el-form label-width="90px">
+        <el-form-item label="企业签收人">
+          <el-input v-model="rdReceivedBy" placeholder="签收人姓名" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="rdDeliverVisible=false">取消</el-button>
+        <el-button type="success" @click="rdDeliver">确认送达</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="outboundVisible" title="出库登记" width="420px">
       <el-form label-width="90px">
         <el-form-item label="保温箱号">
@@ -79,15 +115,20 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '../api/http'
-import { DELIVERY_STATUS, fmtTime } from '../utils/dict'
+import { DELIVERY_STATUS, REDELIVERY_STATUS, fmtTime } from '../utils/dict'
 
 const list = ref<any[]>([])
+const redeliveries = ref<any[]>([])
 const outboundVisible = ref(false)
+const rdDeliverVisible = ref(false)
 const current = ref<any>(null)
+const rdCurrent = ref<any>(null)
+const rdReceivedBy = ref('')
 const outboundForm = reactive<any>({ thermalBoxNo: '', route: '' })
 
 async function load() {
   list.value = await http.get('/deliveries')
+  redeliveries.value = await http.get('/spoiled/courier-desk')
 }
 
 function openOutbound(row: any) {
@@ -113,6 +154,23 @@ async function pickup(row: any) {
 async function deliver(row: any) {
   await http.post(`/deliveries/${row.id}/deliver`)
   ElMessage.success('已送达，等待企业签收')
+  load()
+}
+
+async function rdPickup(row: any) {
+  await http.post(`/spoiled/redeliveries/${row.id}/pickup`)
+  ElMessage.success('已取货，请优先补送')
+  load()
+}
+function openDeliver(row: any) {
+  rdCurrent.value = row
+  rdReceivedBy.value = ''
+  rdDeliverVisible.value = true
+}
+async function rdDeliver() {
+  await http.post(`/spoiled/redeliveries/${rdCurrent.value.id}/deliver`, { receivedBy: rdReceivedBy.value })
+  ElMessage.success('补送已送达')
+  rdDeliverVisible.value = false
   load()
 }
 

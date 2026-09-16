@@ -134,6 +134,22 @@
           </div>
         </div>
 
+        <div class="panel" v-if="spoiledReports.length">
+          <div class="panel-title">
+            餐食变质售后
+            <el-tag size="small" type="danger" effect="dark" style="margin-left:6px">食安</el-tag>
+          </div>
+          <div v-for="r in spoiledReports" :key="r.id" class="spoiled-row" @click="openReport(r.id)">
+            <el-tag size="small" :type="SPOILED_STATUS[r.status]?.type as any">{{ SPOILED_STATUS[r.status]?.name }}</el-tag>
+            <span class="mono">{{ r.reportNo }}</span>
+            <span>{{ r.items.map((i:any)=>`${i.name}×${i.qty}`).join('，') }}</span>
+            <el-tag size="small" :type="REFUND_STATUS[r.refundStatus]?.type as any">
+              {{ r.refundStatus === 'NONE' ? '未退款' : `退款 ¥${r.refundAmount} ${REFUND_STATUS[r.refundStatus]?.name}` }}
+            </el-tag>
+            <span class="muted" style="margin-left:auto">{{ fmtTime(r.createdAt) }}</span>
+          </div>
+        </div>
+
         <div class="panel" v-if="o.archive">
           <div class="panel-title">交付档案</div>
           <el-descriptions :column="3" border size="small">
@@ -170,6 +186,8 @@
               </el-button>
               <el-button v-if="o.status === 'DELIVERED'" type="success" @click="signVisible = true">签收</el-button>
               <el-button v-if="['COMPLETED', 'SIGNED'].includes(o.status)" @click="feedbackVisible = true">员工用餐反馈</el-button>
+              <el-button v-if="['DELIVERED', 'SIGNED', 'COMPLETED'].includes(o.status)" type="danger" plain
+                @click="openSpoiled">餐食变质/异味售后</el-button>
               <el-button v-if="!['CANCELLED', 'COMPLETED', 'SIGNED'].includes(o.status)" type="danger" plain @click="doCancel">取消订单</el-button>
               <el-button v-if="o.status === 'COMPLETED'" type="primary" plain @click="$router.push(`/orders/new?from=${o.id}`)">再次预订（复购）</el-button>
             </template>
@@ -485,6 +503,78 @@
         <el-button type="warning" @click="doLabel">已全部重新贴标，确认</el-button>
       </template>
     </el-dialog>
+
+    <!-- 餐食变质/异味售后 -->
+    <el-dialog v-model="spoiledVisible" title="餐食变质 / 异味售后" width="680px">
+      <el-alert type="error" :closable="false" show-icon
+        title="请选择问题商品与生产批次，并填写签收时间、上传温控照片、登记食用人员；提交后客服将受理，可批量退款、补送并触发同批次门店下架。"
+        style="margin-bottom:12px" />
+      <el-form label-width="110px">
+        <el-form-item label="问题类型">
+          <el-radio-group v-model="spoiledForm.issueType">
+            <el-radio-button value="ODOR">饭团/餐食异味</el-radio-button>
+            <el-radio-button value="SPOILED">便当变质</el-radio-button>
+            <el-radio-button value="FOREIGN">异物</el-radio-button>
+            <el-radio-button value="TEMP">温控失当</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="签收时间">
+          <el-date-picker v-model="spoiledForm.deliveredAt" type="datetime" style="width:100%" />
+        </el-form-item>
+      </el-form>
+
+      <div class="sub-title">问题商品与批次</div>
+      <el-table :data="spoiledForm.items" size="small" border>
+        <el-table-column label="选择" width="50" align="center">
+          <template #default="{ row }"><el-checkbox v-model="row.checked" /></template>
+        </el-table-column>
+        <el-table-column prop="name" label="商品" min-width="140" />
+        <el-table-column label="数量" width="100">
+          <template #default="{ row }"><el-input-number v-model="row.qty" :min="1" :max="200" size="small" :disabled="!row.checked" controls-position="right" style="width:90px" /></template>
+        </el-table-column>
+        <el-table-column label="生产批次" min-width="200">
+          <template #default="{ row }">
+            <el-select v-model="row.batchId" size="small" filterable placeholder="选择批次" :disabled="!row.checked">
+              <el-option v-for="b in spoiledBatches.filter((x:any)=>x.productId===row.productId)" :key="b.batchId"
+                :label="`${b.batchNo}（生产 ${fmtTime(b.producedAt)} / ${b.status==='DEPLETED'?'已售罄':b.quantity+'份在架'}）`" :value="b.batchId" />
+            </el-select>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div class="sub-title" style="margin-top:12px">温控照片凭证</div>
+      <div v-for="(p,i) in spoiledForm.photos" :key="i" class="photo-edit-row">
+        <el-input v-model="p.fileName" placeholder="照片文件名/说明（如 便当表面.jpg）" style="width:230px" />
+        <el-input-number v-model="p.surfaceTemp" :precision="1" :step="0.1" size="small" controls-position="right" placeholder="表面℃" style="width:120px" />
+        <el-input-number v-model="p.coreTemp" :precision="1" :step="0.1" size="small" controls-position="right" placeholder="中心℃" style="width:120px" />
+        <el-button link type="danger" @click="spoiledForm.photos.splice(i,1)">删除</el-button>
+      </div>
+      <el-button size="small" @click="spoiledForm.photos.push({fileName:'',surfaceTemp:null,coreTemp:null,takenAt:new Date(),note:''})">+ 添加温控照片</el-button>
+
+      <div class="sub-title" style="margin-top:12px">食用人员登记</div>
+      <el-table :data="spoiledForm.diners" size="small" border>
+        <el-table-column label="姓名" min-width="120">
+          <template #default="{ row }"><el-input v-model="row.name" size="small" placeholder="姓名" /></template>
+        </el-table-column>
+        <el-table-column label="电话" min-width="140">
+          <template #default="{ row }"><el-input v-model="row.phone" size="small" placeholder="联系电话" /></template>
+        </el-table-column>
+        <el-table-column label="症状/情况" min-width="180">
+          <template #default="{ row }"><el-input v-model="row.symptom" size="small" placeholder="如 腹泻/异味未食用" /></template>
+        </el-table-column>
+        <el-table-column width="70" align="center">
+          <template #default="{ $index }"><el-button link type="danger" @click="spoiledForm.diners.splice($index,1)">删</el-button></template>
+        </el-table-column>
+      </el-table>
+      <el-button size="small" style="margin-top:6px" @click="spoiledForm.diners.push({name:'',phone:'',symptom:''})">+ 添加食用人员</el-button>
+
+      <el-input v-model="spoiledForm.description" type="textarea" :rows="2" style="margin-top:10px"
+        placeholder="问题描述：异味/变质情况、发现时间、包装与温控异常等" />
+      <template #footer>
+        <el-button @click="spoiledVisible = false">取消</el-button>
+        <el-button type="danger" :loading="spoiledSubmitting" @click="submitSpoiled">提交食安售后</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -497,6 +587,7 @@ import { useAuthStore } from '../stores/auth'
 import {
   ORDER_STATUS, ORDER_FLOW, OCCASIONS, CATEGORIES, INCIDENT_TYPES,
   INCIDENT_STATUS, DELIVERY_STATUS, INVOICE_STATUS, TOPUP_STATUS,
+  SPOILED_STATUS, REFUND_STATUS,
   ALLERGENS, fmtTime, fmtMoney,
 } from '../utils/dict'
 
@@ -535,6 +626,49 @@ const topUpDeadlineMin = computed(() => {
   if (!o.value) return 0
   return Math.floor((new Date(o.value.deliverAt).getTime() - nowTs.value) / 60000)
 })
+
+// ===== 餐食变质售后 =====
+const spoiledVisible = ref(false)
+const spoiledSubmitting = ref(false)
+const spoiledBatches = ref<any[]>([])
+const spoiledForm = reactive<any>({ issueType: 'SPOILED', deliveredAt: null, items: [], photos: [], diners: [{ name: '', phone: '', symptom: '' }], description: '' })
+const spoiledReports = computed(() => o.value?.spoiledReports || [])
+
+async function openSpoiled() {
+  const ctx: any = await http.get(`/spoiled/context/${id}`)
+  spoiledBatches.value = ctx.batches
+  spoiledForm.issueType = 'SPOILED'
+  spoiledForm.deliveredAt = ctx.deliveredAt
+  spoiledForm.items = ctx.items.map((i: any) => ({ ...i, checked: false, qty: 1, batchId: null }))
+  spoiledForm.photos = [{ fileName: '', surfaceTemp: null, coreTemp: null, takenAt: new Date(), note: '' }]
+  spoiledForm.diners = [{ name: '', phone: '', symptom: '' }]
+  spoiledForm.description = ''
+  spoiledVisible.value = true
+}
+
+async function submitSpoiled() {
+  const items = spoiledForm.items
+    .filter((i: any) => i.checked)
+    .map((i: any) => ({ productId: i.productId, name: i.name, batchId: i.batchId, qty: i.qty, issueType: spoiledForm.issueType }))
+  if (!items.length) { ElMessage.warning('请勾选至少一种问题商品'); return }
+  if (items.some((i: any) => !i.batchId)) { ElMessage.warning('请为每种问题商品选择生产批次'); return }
+  const photos = spoiledForm.photos.filter((p: any) => p.fileName)
+  const diners = spoiledForm.diners.filter((p: any) => p.name)
+  spoiledSubmitting.value = true
+  try {
+    await http.post('/spoiled/reports', {
+      orderId: id, issueType: spoiledForm.issueType, deliveredAt: spoiledForm.deliveredAt,
+      items, photos, diners, description: spoiledForm.description,
+    })
+    ElMessage.success('食安售后已提交，客服将立即受理')
+    spoiledVisible.value = false
+    load()
+  } finally { spoiledSubmitting.value = false }
+}
+
+function openReport(rid: number) {
+  router.push(`/aftersales?focus=${rid}`)
+}
 
 const id = Number(route.params.id)
 
@@ -712,4 +846,7 @@ onMounted(load)
 .check-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
 .check-item { background: #f7f8fa; border-radius: 8px; padding: 10px; }
 .check-label { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.spoiled-row { display:flex; align-items:center; gap:10px; padding:8px 6px; border-bottom:1px solid #f2f3f5; cursor:pointer; font-size:13px; }
+.spoiled-row:hover { background:#f7f8fa; }
+.photo-edit-row { display:flex; gap:8px; align-items:center; margin:6px 0; }
 </style>

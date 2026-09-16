@@ -84,6 +84,39 @@ export const TOPUP_STATUS: Record<string, { name: string; type: string }> = {
   CANCELLED: { name: '已取消', type: 'info' },
 }
 
+export const SPOILED_ISSUE: Record<string, string> = {
+  ODOR: '饭团/餐食异味',
+  SPOILED: '便当变质',
+  FOREIGN: '异物',
+  TEMP: '温控失当',
+}
+
+export const SPOILED_STATUS: Record<string, { name: string; type: string }> = {
+  OPEN: { name: '待受理', type: 'danger' },
+  PROCESSING: { name: '处理中', type: 'warning' },
+  RESOLVED: { name: '已办结', type: 'success' },
+}
+
+export const REFUND_STATUS: Record<string, { name: string; type: string }> = {
+  NONE: { name: '未退款', type: 'info' },
+  PROPOSED: { name: '待财务确认', type: 'warning' },
+  CONFIRMED: { name: '已确认退款', type: 'success' },
+}
+
+export const RECALL_STATUS: Record<string, { name: string; type: string }> = {
+  ISSUED: { name: '已下发', type: 'danger' },
+  PARTIAL_DONE: { name: '部分处理', type: 'warning' },
+  ALL_DONE: { name: '待运营复核', type: 'primary' },
+  CLOSED: { name: '复核关闭', type: 'success' },
+}
+
+export const REDELIVERY_STATUS: Record<string, { name: string; type: string }> = {
+  PENDING: { name: '待门店备货', type: 'warning' },
+  READY: { name: '待骑手取货', type: 'primary' },
+  PICKED: { name: '补送中', type: 'warning' },
+  DELIVERED: { name: '已送达', type: 'success' },
+}
+
 export const SETTLEMENT_STATUS: Record<string, { name: string; type: string }> = {
   OPEN: { name: '待确认', type: 'warning' },
   CONFIRMED: { name: '企业已确认', type: 'primary' },

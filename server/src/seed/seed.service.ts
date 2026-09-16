@@ -14,6 +14,7 @@ import { Incident, IncidentLog } from '../entities/incident.entity';
 import { Invoice, Settlement } from '../entities/finance.entity';
 import { Archive, Feedback } from '../entities/archive.entity';
 import { MealTopUp } from '../entities/topup.entity';
+import { SpoiledReport, BatchRecall, RecallTask, Redelivery } from '../entities/spoiled.entity';
 
 @Injectable()
 export class SeedService implements OnApplicationBootstrap {
@@ -39,6 +40,10 @@ export class SeedService implements OnApplicationBootstrap {
     @InjectRepository(Archive) private archiveRepo: Repository<Archive>,
     @InjectRepository(Feedback) private feedbackRepo: Repository<Feedback>,
     @InjectRepository(MealTopUp) private topUpRepo: Repository<MealTopUp>,
+    @InjectRepository(SpoiledReport) private spoiledRepo: Repository<SpoiledReport>,
+    @InjectRepository(BatchRecall) private recallRepo: Repository<BatchRecall>,
+    @InjectRepository(RecallTask) private recallTaskRepo: Repository<RecallTask>,
+    @InjectRepository(Redelivery) private redeliveryRepo: Repository<Redelivery>,
   ) {}
 
   async onApplicationBootstrap() {
@@ -512,6 +517,61 @@ export class SeedService implements OnApplicationBootstrap {
       extraCourierRequired: false, extraCourierId: null,
       vegLabelCount: 4, allergyLabelCount: 1, pickListSynced: true,
       createdBy: hyUser.id,
+    }));
+
+    // ============ 餐食变质售后演示 ============
+    // 基于 arch7（晨光科技加班餐，已有食安紧急工单 GD20260913001）：
+    // 2 份黑椒牛柳便当变质，已收集批次/签收时间/温控照片/食用人员；
+    // 客服已受理并提出 2 倍批量退款（¥88，待财务确认），补送单已备货待骑手取货；
+    // 同批次下架由客服在「售后工单」中触发（会扫描 3 家门店在架库存与未配送团餐）。
+    const spoiledBatch = await this.batchRepo.findOne({
+      where: { storeId: stores[0].id, productId: P('BENTO-01').id, status: 'AVAILABLE' },
+      order: { producedAt: 'DESC' },
+    });
+    const spoiledReport = await this.spoiledRepo.save(this.spoiledRepo.create({
+      reportNo: 'SH-SEED01', orderId: arch7.id, enterpriseId: ent1.id, storeId: stores[0].id,
+      incidentId: openIncident.id, issueType: 'SPOILED',
+      items: [{
+        productId: P('BENTO-01').id, name: '黑椒牛柳便当', category: 'BENTO',
+        unitPrice: 22, qty: 2, issueType: 'SPOILED',
+        batchId: spoiledBatch?.id ?? null, batchNo: spoiledBatch?.batchNo || '批次待核对',
+      }],
+      deliveredAt: this.daysFromNow(-3, 12),
+      photos: [
+        { fileName: '温控照片-便当表面.jpg', surfaceTemp: 38.2, coreTemp: 35.6, takenAt: this.daysFromNow(-3, 13), note: '开箱后保温箱温度偏高，便当表面发黏' },
+        { fileName: '包装标签批次.jpg', surfaceTemp: null, coreTemp: null, takenAt: this.daysFromNow(-3, 13), note: '包装标签与批次号清晰可辨' },
+      ],
+      diners: [
+        { name: '张伟', phone: '13500010001', symptom: '食用后腹泻' },
+        { name: '陈静（员工）', phone: '13500010002', symptom: '异味未食用' },
+        { name: '黄磊', phone: '13500010003', symptom: '轻微恶心' },
+      ],
+      description: '加班餐 2 份黑椒牛柳便当开封有酸味、米饭发黏，疑似冷链中断，请按食安流程处理',
+      status: 'PROCESSING',
+      refundAmount: 88, refundMultiplier: 2, refundStatus: 'PROPOSED',
+      handledBy: users[8].id, createdBy: cgUser.id,
+    }));
+    // 补送单：门店已用新鲜批次备货（扣减 2 份），待骑手取货送达
+    if (spoiledBatch) {
+      spoiledBatch.quantity = Math.max(0, spoiledBatch.quantity - 2);
+      if (spoiledBatch.quantity === 0) spoiledBatch.status = 'DEPLETED';
+      await this.batchRepo.save(spoiledBatch);
+    }
+    const redelivery = await this.redeliveryRepo.save(this.redeliveryRepo.create({
+      redeliveryNo: 'BC-SEED01', reportId: spoiledReport.id, orderId: arch7.id,
+      enterpriseId: ent1.id, storeId: stores[0].id,
+      items: [{ productId: P('BENTO-01').id, name: '黑椒牛柳便当（新鲜批次补送）', quantity: 2, unitPrice: 22 }],
+      status: 'READY', courierId: courier1.id, readyAt: new Date(),
+    }));
+    spoiledReport.redeliveryId = redelivery.id;
+    await this.spoiledRepo.save(spoiledReport);
+    await this.incidentLogRepo.save(this.incidentLogRepo.create({
+      incidentId: openIncident.id, actorId: cgUser.id, actorName: '王芳', actorRole: '企业行政',
+      action: 'CREATED', note: '补充提交结构化变质售后单 SH-SEED01：批次/签收时间/温控照片 2 张/食用人员 3 人已收集',
+    }));
+    await this.incidentLogRepo.save(this.incidentLogRepo.create({
+      incidentId: openIncident.id, actorId: users[8].id, actorName: '陈静', actorRole: '客服',
+      action: 'COMMENT', note: '已受理：提出 2 倍批量退款 ¥88 待财务确认；补送单 BC-SEED01 已备货待骑手送达；同批次下架待触发',
     }));
   }
 }

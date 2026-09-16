@@ -10,6 +10,7 @@ import { Invoice } from '../../entities/finance.entity';
 import { Archive, Feedback } from '../../entities/archive.entity';
 import { User, UserRole } from '../../entities/user.entity';
 import { MealTopUp } from '../../entities/topup.entity';
+import { SpoiledReport } from '../../entities/spoiled.entity';
 import { PlanService } from './plan.service';
 import { NotificationService } from '../notification/notification.service';
 
@@ -29,6 +30,7 @@ export class OrderService {
     @InjectRepository(Feedback) private feedbackRepo: Repository<Feedback>,
     @InjectRepository(User) private userRepo: Repository<User>,
     @InjectRepository(MealTopUp) private topUpRepo: Repository<MealTopUp>,
+    @InjectRepository(SpoiledReport) private spoiledRepo: Repository<SpoiledReport>,
     private planService: PlanService,
     private notify: NotificationService,
     private dataSource: DataSource,
@@ -128,6 +130,7 @@ export class OrderService {
     const feedback = await this.feedbackRepo.find({ where: { orderId: id } });
     const archive = await this.archiveRepo.findOne({ where: { orderId: id } });
     const topUps = await this.topUpRepo.find({ where: { orderId: id }, order: { id: 'DESC' } });
+    const spoiledReports = await this.spoiledRepo.find({ where: { orderId: id }, order: { id: 'DESC' } });
     let courierName: string = null;
     let extraCourierName: string = null;
     if (delivery?.courierId) {
@@ -148,6 +151,7 @@ export class OrderService {
       feedback,
       archive,
       topUps: topUps.filter(t => t.status !== 'CANCELLED'),
+      spoiledReports,
     };
   }
 

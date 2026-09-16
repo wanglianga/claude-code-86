@@ -12,6 +12,7 @@ import { Incident, IncidentLog } from '../entities/incident.entity';
 import { Invoice, Settlement } from '../entities/finance.entity';
 import { Archive, Feedback } from '../entities/archive.entity';
 import { MealTopUp } from '../entities/topup.entity';
+import { SpoiledReport, BatchRecall, RecallTask, Redelivery } from '../entities/spoiled.entity';
 import { SeedService } from './seed.service';
 
 @Module({
@@ -19,6 +20,7 @@ import { SeedService } from './seed.service';
     User, Enterprise, Contract, Store, StoreShift, Product, InventoryBatch,
     Supplier, SupplierDelivery, MealOrder, MealPlan, Delivery,
     Incident, IncidentLog, Invoice, Settlement, Archive, Feedback, MealTopUp,
+    SpoiledReport, BatchRecall, RecallTask, Redelivery,
   ])],
   providers: [SeedService],
 })

@@ -13,6 +13,7 @@ import { Archive, Feedback } from './entities/archive.entity';
 import { Supplier, SupplierDelivery } from './entities/supplier.entity';
 import { Notification } from './entities/notification.entity';
 import { MealTopUp } from './entities/topup.entity';
+import { SpoiledReport, BatchRecall, RecallTask, Redelivery } from './entities/spoiled.entity';
 import { AuthModule } from './modules/auth/auth.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { EnterpriseModule } from './modules/enterprise/enterprise.module';
@@ -28,6 +29,7 @@ import { ArchiveModule } from './modules/archive/archive.module';
 import { SupplierModule } from './modules/supplier/supplier.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { TopUpModule } from './modules/topup/topup.module';
+import { SpoiledModule } from './modules/spoiled/spoiled.module';
 import { SeedModule } from './seed/seed.module';
 import { CoreModule } from './core/core.module';
 
@@ -45,6 +47,7 @@ import { CoreModule } from './core/core.module';
         InventoryBatch, Transfer, MealOrder, MealPlan, Delivery,
         Incident, IncidentLog, Invoice, Settlement, Archive, Feedback,
         Supplier, SupplierDelivery, Notification, MealTopUp,
+        SpoiledReport, BatchRecall, RecallTask, Redelivery,
       ],
       synchronize: true,
       retryAttempts: 10,
@@ -66,6 +69,7 @@ import { CoreModule } from './core/core.module';
     SupplierModule,
     DashboardModule,
     TopUpModule,
+    SpoiledModule,
     SeedModule,
   ],
 })
