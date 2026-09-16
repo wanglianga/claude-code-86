@@ -1,0 +1,38 @@
+services:
+  app:
+    build: .
+    image: freshmeal-app
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASS: ${DB_PASS:-freshmeal123}
+      DB_NAME: freshmeal
+      JWT_SECRET: ${JWT_SECRET:-freshmeal-dev-secret}
+      PORT: "3000"
+      SEED_ON_EMPTY: ${SEED_ON_EMPTY:-true}
+    ports:
+      # 仅把应用服务端口发布到宿主；数据库不发布
+      - "${CC_PUBLISH_PORT}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASS:-freshmeal123}
+      POSTGRES_DB: freshmeal
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d freshmeal"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  pgdata:
