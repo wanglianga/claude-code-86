@@ -70,6 +70,20 @@ export const INVOICE_STATUS: Record<string, { name: string; type: string }> = {
   REISSUED: { name: '已红冲', type: 'info' },
 }
 
+export const INVOICE_KIND: Record<string, { name: string; type: string }> = {
+  ORIGIN: { name: '原单发票', type: 'info' },
+  TOPUP_DIFF: { name: '加餐补差', type: 'warning' },
+  FULL: { name: '全额（含加餐）', type: 'primary' },
+}
+
+export const TOPUP_STATUS: Record<string, { name: string; type: string }> = {
+  CHECKED: { name: '已核查待确认', type: 'warning' },
+  CONFIRMED: { name: '已确认待贴标', type: 'danger' },
+  LABELLED: { name: '贴标完成待配送', type: 'primary' },
+  FULFILLED: { name: '已并入配送', type: 'success' },
+  CANCELLED: { name: '已取消', type: 'info' },
+}
+
 export const SETTLEMENT_STATUS: Record<string, { name: string; type: string }> = {
   OPEN: { name: '待确认', type: 'warning' },
   CONFIRMED: { name: '企业已确认', type: 'primary' },

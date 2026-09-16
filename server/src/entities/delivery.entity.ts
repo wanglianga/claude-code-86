@@ -49,6 +49,25 @@ export class Delivery {
   @Column({ default: false })
   late: boolean;
 
+  /** 特殊餐标（临时加餐同步）：[{name, tag, productName, labelCode, source:'ORIGIN'|'TOPUP'}] */
+  @Column({ type: 'jsonb', default: [] })
+  specialLabels: any[];
+
+  /** 原保温箱容量（份），配送容量核查依据 */
+  @Column({ default: 60 })
+  boxCapacity: number;
+
+  /** 临时加餐是否加派配送员/保温箱 */
+  @Column({ default: false })
+  extraDispatch: boolean;
+
+  @Column({ nullable: true })
+  extraCourierId: number;
+
+  /** 追加份数（用于配送员核对总份数） */
+  @Column({ default: 0 })
+  topUpQty: number;
+
   @CreateDateColumn()
   createdAt: Date;
 }

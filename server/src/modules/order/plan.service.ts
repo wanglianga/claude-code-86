@@ -6,6 +6,7 @@ import { Store, StoreShift } from '../../entities/store.entity';
 import { Enterprise, Contract } from '../../entities/enterprise.entity';
 import { Product, CATEGORY_NAMES } from '../../entities/product.entity';
 import { InventoryBatch } from '../../entities/inventory.entity';
+import { Delivery } from '../../entities/delivery.entity';
 
 /** 临期判定：送达后 6 小时内到期 */
 const NEAR_EXPIRY_HOURS = 6;
@@ -44,6 +45,7 @@ export class PlanService {
     @InjectRepository(Contract) private contractRepo: Repository<Contract>,
     @InjectRepository(Product) private productRepo: Repository<Product>,
     @InjectRepository(InventoryBatch) private batchRepo: Repository<InventoryBatch>,
+    @InjectRepository(Delivery) private deliveryRepo: Repository<Delivery>,
   ) {}
 
   /**
@@ -248,6 +250,232 @@ export class PlanService {
       return { ok: false, reason: `套餐成本 ¥${total.toFixed(2)} 超出餐标预算 ¥${budgetTotal.toFixed(2)}` };
     }
     return { ok: true, items, totalPrice: Math.round(total * 100) / 100 };
+  }
+
+  /** 套餐金额（同 buildMenu 口径：正常份原价，临期份 7 折） */
+  private amountOf(items: any[]) {
+    return Math.round(items.reduce((s: number, i: any) => {
+      const near = i.nearExpiryQty || 0;
+      return s + (i.quantity - near) * Number(i.unitPrice) + near * Number(i.unitPrice) * NEAR_EXPIRY_DISCOUNT;
+    }, 0) * 100) / 100;
+  }
+
+  /**
+   * 临时加餐可行性核查（送达前临时加人）。
+   *
+   * 对「原门店 + 周边 15km 门店」逐店核查：
+   *  1. 周边门店库存（送达时仍在保质期内的可用批次，且排除本单已预占/已扣减的加餐）
+   *  2. 制作批次（优先临期批次）与组餐可行性（追加人数/素食/过敏忌口）
+   *  3. 门店当日剩余团餐产能
+   *  4. 配送容量（原保温箱剩余份数；不足则给出加派结论与加派费）
+   *  5. 发票金额（原发票金额 + 追加餐费 + 加派费 → 差额）
+   *
+   * 纯读操作，不落库、不扣库存。
+   */
+  async evaluateTopUp(
+    order: MealOrder,
+    dto: { addHeadcount: number; addVegetarianCount: number; addAllergies: string[]; roster: any[] },
+  ) {
+    const enterprise = await this.enterpriseRepo.findOne({ where: { id: order.enterpriseId } });
+    const contract = order.contractId
+      ? await this.contractRepo.findOne({ where: { id: order.contractId } })
+      : await this.contractRepo.findOne({ where: { enterpriseId: order.enterpriseId, status: 'ACTIVE' } });
+    const discount = contract?.discount || 1;
+    const products = await this.productRepo.find({ where: { active: true } });
+
+    const deliverAt = new Date(order.deliverAt);
+    const usableBefore = new Date(deliverAt.getTime() - 30 * 60 * 1000);
+    const nearLimit = deliverAt.getTime() + NEAR_EXPIRY_HOURS * 3600 * 1000;
+
+    // 追加餐忌口 = 追加忌口与原单忌口并集（原单剔除规则必须继续成立）
+    const allergies = Array.from(new Set([...(order.allergies || []), ...(dto.addAllergies || [])]));
+    const safe = (p: Product) => !allergies.some(a => (p.allergens || []).includes(a));
+    const prefs = (enterprise?.preferences as any) || {};
+    const likes: string[] = prefs.likes || [];
+
+    // 临时加餐订单（用于复用组餐引擎；预算沿用原单人均餐标，确保不加价超餐标）
+    const addOrder = {
+      headcount: dto.addHeadcount,
+      vegetarianCount: dto.addVegetarianCount,
+      mealBudget: order.mealBudget,
+      allergies,
+    } as MealOrder;
+
+    // 原方案尚未扣减库存（CONFIRMED/PREPARING）时，核查需为原单预留库存，
+    // 避免临时加餐抢占原单备货；READY 后原单已扣减，库存为实时余量。
+    const reserveByProduct = new Map<number, number>();
+    if (order.status !== 'READY') {
+      const basePlan = await this.planRepo.findOne({
+        where: { orderId: order.id, status: 'ACCEPTED' }, order: { version: 'DESC' },
+      });
+      for (const it of basePlan?.items || []) {
+        reserveByProduct.set(it.productId, (reserveByProduct.get(it.productId) || 0) + it.quantity);
+      }
+    }
+
+    // 配送容量：原单总份数 + 追加份数 vs 保温箱容量
+    const delivery = await this.deliveryRepo.findOne({ where: { orderId: order.id } });
+    const boxCapacity = delivery?.boxCapacity || 60;
+    const originQty = order.headcount;
+    const totalAfter = originQty + dto.addHeadcount;
+    const overflow = Math.max(0, totalAfter - boxCapacity);
+    const extraDispatchFee = overflow > 0 ? 15 : 0; // 加派保温箱/骑手服务费
+
+    // 周边门店（含原门店），按距离排序，原门店优先
+    const stores = await this.storeRepo.find({ where: { status: 'OPEN' } });
+    const enriched = stores
+      .map(s => ({ store: s, distance: haversineKm(s.lat, s.lng, enterprise?.lat || 0, enterprise?.lng || 0) }))
+      .filter(x => x.distance <= MAX_DISTANCE_KM)
+      .sort((a, b) => (a.store.id === order.storeId ? -1 : b.store.id === order.storeId ? 1 : a.distance - b.distance));
+
+    // 注：已确认加餐在确认时已物理扣减批次库存、并已累加进订单 headcount，
+    // 因此这里直接读取实时批次数量与订单人数即可，无需再二次排除。
+
+    const dayStr = deliverAt.toISOString().slice(0, 10);
+    const dayStart = new Date(dayStr + 'T00:00:00Z');
+    const dayEnd = new Date(dayStr + 'T23:59:59Z');
+
+    const checks: any[] = [];
+
+    for (const { store, distance } of enriched) {
+      // 当日已承接团餐份数（订单人数已包含历史加餐）
+      const dayOrders = await this.orderRepo.createQueryBuilder('o')
+        .where('o.storeId = :sid', { sid: store.id })
+        .andWhere('o.deliverAt BETWEEN :s AND :e', { s: dayStart, e: dayEnd })
+        .andWhere("o.status NOT IN ('CANCELLED','DRAFT')")
+        .getMany();
+      const usedCapacity = dayOrders.reduce((s, o) => s + o.headcount, 0);
+      const remainingCapacity = store.dailyCapacity - usedCapacity;
+      const capacityOk = remainingCapacity >= dto.addHeadcount;
+
+      const shift = await this.shiftRepo.findOne({ where: { storeId: store.id, date: dayStr } });
+      const staffShort = shift ? Math.max(0, shift.requiredStaff - shift.actualStaff) : 0;
+
+      // 可用批次池（送达时未过期；数量为确认加餐扣减后的实时值）
+      const batches = (await this.batchRepo.find({
+        where: { storeId: store.id, status: 'AVAILABLE' },
+        order: { expiresAt: 'ASC' },
+      })).filter(b => b.quantity > 0 && b.expiresAt > usableBefore);
+
+      const stockByProduct = new Map<number, { normal: number; nearExpiry: number }>();
+      const batchPool = new Map<number, { id: number; left: number; near: boolean }[]>();
+      for (const b of batches) {
+        // 原门店需为尚未扣减的原方案预留库存（临期优先预留，与备货出库口径一致）
+        let left = b.quantity;
+        if (store.id === order.storeId && reserveByProduct.has(b.productId)) {
+          const reserve = Math.min(left, reserveByProduct.get(b.productId)!);
+          reserveByProduct.set(b.productId, reserveByProduct.get(b.productId)! - reserve);
+          left -= reserve;
+          if (left <= 0) continue;
+        }
+        const near = b.expiresAt.getTime() <= nearLimit;
+        const cur = stockByProduct.get(b.productId) || { normal: 0, nearExpiry: 0 };
+        if (near) cur.nearExpiry += left; else cur.normal += left;
+        stockByProduct.set(b.productId, cur);
+        const list = batchPool.get(b.productId) || [];
+        list.push({ id: b.id, left, near });
+        batchPool.set(b.productId, list);
+      }
+
+      const menu = this.buildMenu(addOrder, products, stockByProduct, safe, likes, discount);
+
+      // 批次级分配方案（临期优先），供确认时扣减
+      const allocations: any[] = [];
+      let stockOk = !!menu.ok;
+      if (menu.ok) {
+        for (const item of menu.items!) {
+          let remain = item.quantity;
+          let nearQty = 0;
+          const pools = (batchPool.get(item.productId) || []).slice().sort((a, b) => Number(b.near) - Number(a.near));
+          for (const p of pools) {
+            if (remain <= 0) break;
+            const use = Math.min(p.left, remain);
+            if (use <= 0) continue;
+            p.left -= use;
+            remain -= use;
+            if (p.near) nearQty += use;
+            allocations.push({ batchId: p.id, productId: item.productId, quantity: use, nearExpiryQty: p.near ? use : 0 });
+          }
+          if (remain > 0) { stockOk = false; break; }
+          // 合并同批次分配
+          item.nearExpiryQty = nearQty;
+        }
+      }
+      const mergedAlloc = this.mergeAllocations(allocations);
+
+      const addAmount = menu.ok ? this.amountOf(menu.items!) : 0;
+      checks.push({
+        storeId: store.id,
+        storeName: store.name,
+        distance: Math.round(distance * 10) / 10,
+        origin: store.id === order.storeId,
+        stockOk: !!menu.ok && stockOk,
+        capacityOk,
+        remainingCapacity,
+        staffShort,
+        failReason: !menu.ok ? menu.reason : (!stockOk ? '批次库存被占用，请稍后重试' : null),
+        items: menu.ok ? menu.items : [],
+        allocations: mergedAlloc,
+        addAmount,
+        nearExpiryQty: menu.ok ? menu.items!.reduce((s, i) => s + (i.nearExpiryQty || 0), 0) : 0,
+      });
+    }
+
+    // 选择可行门店：原门店优先，其次距离最近；库存与产能须同时满足
+    const feasible = checks.filter(c => c.stockOk && c.capacityOk)
+      .sort((a, b) => Number(b.origin) - Number(a.origin) || a.distance - b.distance);
+    const best = feasible[0] || null;
+
+    // 特殊餐标
+    const vegLabels = dto.addVegetarianCount;
+    const allergyLabels = (dto.roster || []).filter(r => r.tag && String(r.tag).startsWith('过敏')).length;
+
+    const invoiceBefore = Number(order.totalAmount);
+    const addAmount = best ? best.addAmount : 0;
+    const totalDiff = Math.round((addAmount + extraDispatchFee) * 100) / 100;
+    const invoiceAfter = Math.round((invoiceBefore + totalDiff) * 100) / 100;
+
+    return {
+      ok: !!best,
+      reason: best ? null : '周边门店库存、制作批次或产能均无法覆盖本次临时加餐，请客服协调调拨或与企业协商调整份数/送达时间',
+      addHeadcount: dto.addHeadcount,
+      addVegetarianCount: dto.addVegetarianCount,
+      addAllergies: allergies,
+      roster: dto.roster || [],
+      storeId: best?.storeId,
+      storeName: best?.storeName,
+      distance: best?.distance,
+      useOriginStore: best ? best.origin : false,
+      items: best?.items || [],
+      allocations: best?.allocations || [],
+      addAmount,
+      extraDispatchFee,
+      totalDiff,
+      invoiceBefore,
+      invoiceAfter,
+      nearExpiryQty: best?.nearExpiryQty || 0,
+      checks,
+      deliveryCapacity: {
+        boxCapacity,
+        originQty,
+        totalAfter,
+        overflow,
+        extraDispatch: overflow > 0,
+        fee: extraDispatchFee,
+      },
+      labels: { vegetarian: vegLabels, allergy: allergyLabels, total: vegLabels + allergyLabels },
+    };
+  }
+
+  private mergeAllocations(allocations: any[]) {
+    const m = new Map<number, any>();
+    for (const a of allocations) {
+      const cur = m.get(a.batchId) || { batchId: a.batchId, productId: a.productId, quantity: 0, nearExpiryQty: 0 };
+      cur.quantity += a.quantity;
+      cur.nearExpiryQty += a.nearExpiryQty;
+      m.set(a.batchId, cur);
+    }
+    return Array.from(m.values());
   }
 
   /** 落库一个新方案版本 */

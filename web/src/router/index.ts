@@ -12,6 +12,7 @@ const routes = [
       { path: 'orders/:id', component: () => import('../views/OrderDetail.vue') },
       { path: 'repurchase', component: () => import('../views/Repurchase.vue') },
       { path: 'inventory', component: () => import('../views/Inventory.vue') },
+      { path: 'picklist', component: () => import('../views/PickList.vue') },
       { path: 'store-ops', component: () => import('../views/StoreOps.vue') },
       { path: 'deliveries', component: () => import('../views/Deliveries.vue') },
       { path: 'incidents', component: () => import('../views/Incidents.vue') },

@@ -9,6 +9,7 @@ import { Incident, IncidentLog } from '../../entities/incident.entity';
 import { Invoice } from '../../entities/finance.entity';
 import { Archive, Feedback } from '../../entities/archive.entity';
 import { User, UserRole } from '../../entities/user.entity';
+import { MealTopUp } from '../../entities/topup.entity';
 import { PlanService } from './plan.service';
 import { NotificationService } from '../notification/notification.service';
 
@@ -27,6 +28,7 @@ export class OrderService {
     @InjectRepository(Archive) private archiveRepo: Repository<Archive>,
     @InjectRepository(Feedback) private feedbackRepo: Repository<Feedback>,
     @InjectRepository(User) private userRepo: Repository<User>,
+    @InjectRepository(MealTopUp) private topUpRepo: Repository<MealTopUp>,
     private planService: PlanService,
     private notify: NotificationService,
     private dataSource: DataSource,
@@ -125,20 +127,27 @@ export class OrderService {
     const invoice = await this.invoiceRepo.findOne({ where: { orderId: id } });
     const feedback = await this.feedbackRepo.find({ where: { orderId: id } });
     const archive = await this.archiveRepo.findOne({ where: { orderId: id } });
+    const topUps = await this.topUpRepo.find({ where: { orderId: id }, order: { id: 'DESC' } });
     let courierName: string = null;
+    let extraCourierName: string = null;
     if (delivery?.courierId) {
       const c = await this.userRepo.findOne({ where: { id: delivery.courierId } });
       courierName = c?.name;
+    }
+    if (delivery?.extraCourierId) {
+      const c = await this.userRepo.findOne({ where: { id: delivery.extraCourierId } });
+      extraCourierName = c?.name;
     }
     return {
       ...order,
       enterpriseName: enterprise?.name,
       plans,
-      delivery: delivery ? { ...delivery, courierName } : null,
+      delivery: delivery ? { ...delivery, courierName, extraCourierName } : null,
       incidents,
       invoice,
       feedback,
       archive,
+      topUps: topUps.filter(t => t.status !== 'CANCELLED'),
     };
   }
 
@@ -307,10 +316,16 @@ export class OrderService {
     }
 
     // ===== 阶段二：全部满足 → 单事务一次落库 =====
+    // 已确认加餐可能已指定加派骑手；主骑手须避开加派骑手，保证加派的是另一个人
+    const confirmedTopUps = await this.topUpRepo.find({
+      where: { orderId: order.id, status: In(['CONFIRMED', 'LABELLED']) },
+    });
+    const extraCourierIds = confirmedTopUps.map(t => t.extraCourierId).filter(Boolean);
     const couriers = await this.userRepo.find({ where: { role: UserRole.LOGISTICS, active: true } });
     let courier: User = null;
-    if (couriers.length) {
-      const counts = await Promise.all(couriers.map(async (c) => ({
+    const mainCouriers = couriers.filter(c => !extraCourierIds.includes(c.id));
+    if (mainCouriers.length) {
+      const counts = await Promise.all(mainCouriers.map(async (c) => ({
         c, n: await this.deliveryRepo.createQueryBuilder('d')
           .where('d.courierId = :id', { id: c.id })
           .andWhere("d.status NOT IN ('SIGNED','DELIVERED')").getCount(),
@@ -345,10 +360,23 @@ export class OrderService {
       await em.save(plan);
       order.status = OrderStatus.READY;
       await em.save(order);
+
+      // 备货前确认的临时加餐：特殊餐标/追加份数/加派信息随配送单一并下发给配送员
+      const topUps = await em.find(MealTopUp, {
+        where: { orderId: order.id, status: In(['CONFIRMED', 'LABELLED']) },
+      });
+      const extraLabels = topUps.flatMap(t =>
+        (t.specialDietRoster || []).map((l: any) => ({ ...l, source: 'TOPUP', topUpNo: t.topUpNo })));
+      const topUpQty = topUps.reduce((s, t) => s + t.addHeadcount, 0);
+      const extraDispatch = topUps.some(t => t.extraCourierRequired);
       await em.save(em.create(Delivery, {
         orderId: order.id,
         courierId: courier?.id ?? null,
         status: courier ? 'ASSIGNED' : 'PENDING',
+        specialLabels: extraLabels,
+        topUpQty,
+        extraDispatch,
+        extraCourierId: extraDispatch ? (topUps.find(t => t.extraCourierId)?.extraCourierId ?? null) : null,
       }));
     });
 
@@ -445,7 +473,18 @@ export class OrderService {
     const onTime = delivery?.deliveredAt
       ? delivery.deliveredAt.getTime() <= new Date(order.deliverAt).getTime() + 15 * 60 * 1000
       : true;
-    const nearExpiryUsed = (plan?.items || []).reduce((s: number, i: any) => s + (i.nearExpiryQty || 0), 0);
+
+    // 合并已确认临时加餐明细（追加商品、临期使用量）进入交付档案
+    const topUps = await this.topUpRepo.find({
+      where: { orderId: order.id, status: In(['CONFIRMED', 'LABELLED', 'FULFILLED']) },
+    });
+    const archiveItems = [...(plan?.items || [])];
+    for (const t of topUps) {
+      for (const it of t.items || []) {
+        archiveItems.push({ ...it, fromTopUp: true, topUpNo: t.topUpNo });
+      }
+    }
+    const nearExpiryUsed = archiveItems.reduce((s: number, i: any) => s + (i.nearExpiryQty || 0), 0);
 
     const archive = this.archiveRepo.create({
       orderId: order.id,
@@ -461,7 +500,7 @@ export class OrderService {
       incidentCount: incidents.length,
       invoiceErrors: 0,
       rating: 5,
-      items: plan?.items || [],
+      items: archiveItems,
       deliveredAt: delivery?.deliveredAt ?? null,
     });
     await this.archiveRepo.save(archive);
@@ -469,27 +508,38 @@ export class OrderService {
     order.status = OrderStatus.COMPLETED;
     await this.orderRepo.save(order);
 
-    // 单结企业：自动生成待开发票
+    // 单结企业：自动生成待开发票（加餐差额发票已在加餐确认时生成/累加，不重复开具）
     const contract = order.contractId
       ? await this.contractRepo.findOne({ where: { id: order.contractId } })
       : null;
     if (order.invoiceRequired && contract?.settlementType !== 'MONTHLY') {
       const enterprise = await this.enterpriseRepo.findOne({ where: { id: order.enterpriseId } });
-      await this.invoiceRepo.save(this.invoiceRepo.create({
-        invoiceNo: `INV${Date.now()}`,
-        enterpriseId: order.enterpriseId,
-        orderId: order.id,
-        title: order.invoiceTitle || enterprise?.invoiceTitle || enterprise?.name,
-        taxNo: order.taxNo || enterprise?.taxNo || '',
-        amount: order.actualAmount ?? order.totalAmount,
-        status: 'PENDING',
-      }));
-      await this.notify.send({
-        role: 'FINANCE',
-        title: '待开发票',
-        content: `团餐单 ${order.orderNo} 已签收归档，企业申请开发票，请及时处理`,
-        type: 'FINANCE', orderId: order.id,
+      const existing = await this.invoiceRepo.findOne({
+        where: { orderId: order.id },
+        order: { id: 'DESC' },
       });
+      if (!existing) {
+        await this.invoiceRepo.save(this.invoiceRepo.create({
+          invoiceNo: `INV${Date.now()}`,
+          enterpriseId: order.enterpriseId,
+          orderId: order.id,
+          title: order.invoiceTitle || enterprise?.invoiceTitle || enterprise?.name,
+          taxNo: order.taxNo || enterprise?.taxNo || '',
+          amount: order.actualAmount ?? order.totalAmount,
+          status: 'PENDING',
+        }));
+        await this.notify.send({
+          role: 'FINANCE',
+          title: '待开发票',
+          content: `团餐单 ${order.orderNo} 已签收归档，企业申请开发票，请及时处理`,
+          type: 'FINANCE', orderId: order.id,
+        });
+      } else if (existing.status === 'PENDING') {
+        // 加餐已更新过金额，签收后以实际金额兜底校准
+        existing.amount = order.actualAmount ?? order.totalAmount;
+        existing.kind = existing.kind || 'FULL';
+        await this.invoiceRepo.save(existing);
+      }
     }
     await this.notify.send({
       enterpriseId: order.enterpriseId,

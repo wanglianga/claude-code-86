@@ -13,6 +13,7 @@ import { Delivery } from '../entities/delivery.entity';
 import { Incident, IncidentLog } from '../entities/incident.entity';
 import { Invoice, Settlement } from '../entities/finance.entity';
 import { Archive, Feedback } from '../entities/archive.entity';
+import { MealTopUp } from '../entities/topup.entity';
 
 @Injectable()
 export class SeedService implements OnApplicationBootstrap {
@@ -37,6 +38,7 @@ export class SeedService implements OnApplicationBootstrap {
     @InjectRepository(Settlement) private settlementRepo: Repository<Settlement>,
     @InjectRepository(Archive) private archiveRepo: Repository<Archive>,
     @InjectRepository(Feedback) private feedbackRepo: Repository<Feedback>,
+    @InjectRepository(MealTopUp) private topUpRepo: Repository<MealTopUp>,
   ) {}
 
   async onApplicationBootstrap() {
@@ -426,5 +428,90 @@ export class SeedService implements OnApplicationBootstrap {
       this.feedbackRepo.create({ orderId: arch6.id, rating: 5, comment: '临期折扣很实惠，品质没问题', createdBy: cgUser.id }),
       this.feedbackRepo.create({ orderId: arch7.id, rating: 2, comment: '有 2 份便当异味，已反馈客服', spoiled: true, createdBy: cgUser.id }),
     ]);
+
+    // ============ 临时加餐演示 ============
+    // 场景一：晨光科技 40 人会议餐已确认、约 70 分钟后送达（送达前一小时窗口内），
+    //         企业可在订单详情直接发起「临时加餐 30 份」体验 核查→确认→贴标 全流程
+    //         （40+30=70 超过保温箱 60 份容量，核查报告会要求加派骑手）。
+    const topupDemoOrder = await this.orderRepo.save(this.orderRepo.create({
+      orderNo: `TM${Date.now().toString().slice(-10)}04`,
+      enterpriseId: ent1.id, contractId: contract1.id, storeId: stores[0].id,
+      occasion: 'MEETING', headcount: 40, mealBudget: 30, vegetarianCount: 4,
+      allergies: ['海鲜'], deliverAt: this.hoursFromNow(70 / 60),
+      address: ent1.address, contactName: '王芳', contactPhone: '13800001111',
+      backupContactName: '刘洋', backupContactPhone: '13800002222',
+      invoiceRequired: true, invoiceTitle: ent1.invoiceTitle, taxNo: ent1.taxNo,
+      remark: '临时会议扩编，请预留加餐能力',
+      status: OrderStatus.CONFIRMED, totalAmount: 1112.4, createdBy: cgUser.id,
+    }));
+    await this.planRepo.save(this.planRepo.create({
+      orderId: topupDemoOrder.id, storeId: stores[0].id,
+      items: [
+        { productId: P('BENTO-02').id, name: '照烧鸡腿便当', category: 'BENTO', quantity: 36, unitPrice: 19, nearExpiryQty: 0, vegetarian: false },
+        { productId: P('BENTO-03').id, name: '田园时蔬素食便当', category: 'BENTO', quantity: 4, unitPrice: 17.1, nearExpiryQty: 0, vegetarian: true },
+        { productId: P('DRINK-01').id, name: '鲜榨橙汁', category: 'DRINK', quantity: 40, unitPrice: 5.7, nearExpiryQty: 0, vegetarian: true },
+        { productId: P('FRUIT-01').id, name: '香蕉', category: 'FRUIT', quantity: 40, unitPrice: 3.3, nearExpiryQty: 0, vegetarian: true },
+      ],
+      totalPrice: 1112.4,
+      reasons: ['优选「鲜达·中心旗舰店」供餐：距企业 0.3km，库存与产能充足', '含素食 4 份，单独装配并标注', '适用长期合同折扣 9.5 折'],
+      warnings: [], version: 1, status: 'ACCEPTED',
+    }));
+
+    // 场景二：恒宇广告 30 人培训餐备货中（约 100 分钟后送达），20 分钟前已临时追加 20 份
+    //         （含 4 份素食、1 人蛋过敏），加餐已确认，等待门店按企业名单贴标；
+    //         单结企业已自动生成差额发票，拣货清单/配送标签已同步。
+    const topupPrepOrder = await this.orderRepo.save(this.orderRepo.create({
+      orderNo: `TM${Date.now().toString().slice(-10)}05`,
+      enterpriseId: ent2.id, storeId: stores[1].id,
+      occasion: 'TRAINING', headcount: 50, mealBudget: 25, vegetarianCount: 6,
+      allergies: ['花生', '蛋'], deliverAt: this.hoursFromNow(100 / 60),
+      address: ent2.address, contactName: '李强', contactPhone: '13900003333',
+      backupContactName: '赵敏', backupContactPhone: '13900004444',
+      invoiceRequired: true, invoiceTitle: ent2.invoiceTitle, taxNo: ent2.taxNo,
+      remark: '培训现场临时增加 20 人，已走加餐流程',
+      status: OrderStatus.PREPARING, totalAmount: 1288, createdBy: hyUser.id,
+    }));
+    await this.planRepo.save(this.planRepo.create({
+      orderId: topupPrepOrder.id, storeId: stores[1].id,
+      items: [
+        { productId: P('BENTO-01').id, name: '黑椒牛柳便当', category: 'BENTO', quantity: 28, unitPrice: 20, nearExpiryQty: 0, vegetarian: false },
+        { productId: P('BENTO-03').id, name: '田园时蔬素食便当', category: 'BENTO', quantity: 2, unitPrice: 18, nearExpiryQty: 0, vegetarian: true },
+        { productId: P('DRINK-01').id, name: '鲜榨橙汁', category: 'DRINK', quantity: 30, unitPrice: 6, nearExpiryQty: 0, vegetarian: true },
+      ],
+      totalPrice: 776,
+      reasons: ['培训餐方案'],
+      warnings: [], version: 1, status: 'ACCEPTED',
+    }));
+    const topupItems = [
+      { productId: P('BENTO-01').id, name: '黑椒牛柳便当', category: 'BENTO', quantity: 16, unitPrice: 20, nearExpiryQty: 0, vegetarian: false },
+      { productId: P('BENTO-03').id, name: '田园时蔬素食便当', category: 'BENTO', quantity: 4, unitPrice: 18, nearExpiryQty: 0, vegetarian: true },
+      { productId: P('DRINK-01').id, name: '鲜榨橙汁', category: 'DRINK', quantity: 20, unitPrice: 6, nearExpiryQty: 0, vegetarian: true },
+    ];
+    const topupRoster = [
+      { name: '陈晨', tag: '素食', labelCode: 'TCSEED01-L01', productName: '田园时蔬素食便当', labelled: false },
+      { name: '吴迪', tag: '素食', labelCode: 'TCSEED01-L02', productName: '田园时蔬素食便当', labelled: false },
+      { name: '素食3', tag: '素食', labelCode: 'TCSEED01-L03', productName: '田园时蔬素食便当', labelled: false },
+      { name: '素食4', tag: '素食', labelCode: 'TCSEED01-L04', productName: '田园时蔬素食便当', labelled: false },
+      { name: '黄磊', tag: '过敏:蛋', labelCode: 'TCSEED01-L05', productName: '黑椒牛柳便当', labelled: false },
+    ];
+    const diffInvoice = await this.invoiceRepo.save(this.invoiceRepo.create({
+      invoiceNo: `INV${Date.now()}TD`, enterpriseId: ent2.id, orderId: topupPrepOrder.id,
+      title: ent2.invoiceTitle, taxNo: ent2.taxNo, amount: 512, status: 'PENDING', kind: 'TOPUP_DIFF',
+    }));
+    await this.topUpRepo.save(this.topUpRepo.create({
+      topUpNo: 'TCSEED01', orderId: topupPrepOrder.id, enterpriseId: ent2.id, storeId: stores[1].id,
+      addHeadcount: 20, addVegetarianCount: 4, addAllergies: ['蛋'],
+      specialDietRoster: topupRoster,
+      items: topupItems, batchAllocations: [],
+      addAmount: 512, addDeliveryFee: 0, totalDiff: 512,
+      invoiceAmountBefore: 776, invoiceAmountAfter: 1288, invoiceId: diffInvoice.id,
+      newDeliverAt: this.hoursFromNow(100 / 60), originDeliverAt: this.hoursFromNow(100 / 60),
+      status: 'CONFIRMED',
+      checks: [],
+      deliveryCapacity: { boxCapacity: 60, originQty: 30, totalAfter: 50, overflow: 0, extraDispatch: false, fee: 0 },
+      extraCourierRequired: false, extraCourierId: null,
+      vegLabelCount: 4, allergyLabelCount: 1, pickListSynced: true,
+      createdBy: hyUser.id,
+    }));
   }
 }

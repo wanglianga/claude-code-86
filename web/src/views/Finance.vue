@@ -6,6 +6,13 @@
         <el-tab-pane label="发票管理" name="invoices">
           <el-table :data="invoices" size="small" border>
             <el-table-column prop="invoiceNo" label="发票号" width="170" class-name="mono" />
+            <el-table-column label="类型" width="110">
+              <template #default="{ row }">
+                <el-tag size="small" :type="INVOICE_KIND[row.kind || 'ORIGIN']?.type as any">
+                  {{ INVOICE_KIND[row.kind || 'ORIGIN']?.name }}
+                </el-tag>
+              </template>
+            </el-table-column>
             <el-table-column v-if="auth.role !== 'ENTERPRISE'" prop="enterpriseName" label="企业" min-width="130" />
             <el-table-column prop="title" label="抬头" min-width="140" show-overflow-tooltip />
             <el-table-column prop="taxNo" label="税号" width="170" class-name="mono" />
@@ -99,7 +106,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '../api/http'
 import { useAuthStore } from '../stores/auth'
-import { INVOICE_STATUS, SETTLEMENT_STATUS, fmtTime, fmtMoney } from '../utils/dict'
+import { INVOICE_STATUS, INVOICE_KIND, SETTLEMENT_STATUS, fmtTime, fmtMoney } from '../utils/dict'
 
 const auth = useAuthStore()
 const tab = ref('invoices')

@@ -11,13 +11,14 @@ import { Delivery } from '../entities/delivery.entity';
 import { Incident, IncidentLog } from '../entities/incident.entity';
 import { Invoice, Settlement } from '../entities/finance.entity';
 import { Archive, Feedback } from '../entities/archive.entity';
+import { MealTopUp } from '../entities/topup.entity';
 import { SeedService } from './seed.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([
     User, Enterprise, Contract, Store, StoreShift, Product, InventoryBatch,
     Supplier, SupplierDelivery, MealOrder, MealPlan, Delivery,
-    Incident, IncidentLog, Invoice, Settlement, Archive, Feedback,
+    Incident, IncidentLog, Invoice, Settlement, Archive, Feedback, MealTopUp,
   ])],
   providers: [SeedService],
 })

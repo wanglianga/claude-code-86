@@ -32,6 +32,14 @@ export class Invoice {
   @Column({ default: 'PENDING' })
   status: string;
 
+  /** 关联临时加餐（差额发票），可为空 */
+  @Column({ nullable: true })
+  topUpId: number;
+
+  /** 差额发票：ORIGIN 原单 / TOPUP_DIFF 加餐补差 / FULL 全额合并 */
+  @Column({ default: 'ORIGIN' })
+  kind: string;
+
   @Column({ type: 'timestamptz', nullable: true })
   issuedAt: Date;
 

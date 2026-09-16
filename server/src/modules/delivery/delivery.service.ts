@@ -1,11 +1,12 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Delivery } from '../../entities/delivery.entity';
 import { MealOrder, OrderStatus } from '../../entities/order.entity';
 import { Incident } from '../../entities/incident.entity';
 import { Store } from '../../entities/store.entity';
 import { Enterprise } from '../../entities/enterprise.entity';
+import { MealTopUp } from '../../entities/topup.entity';
 import { User, UserRole } from '../../entities/user.entity';
 import { NotificationService } from '../notification/notification.service';
 
@@ -17,6 +18,7 @@ export class DeliveryService {
     @InjectRepository(Incident) private incidentRepo: Repository<Incident>,
     @InjectRepository(Store) private storeRepo: Repository<Store>,
     @InjectRepository(Enterprise) private enterpriseRepo: Repository<Enterprise>,
+    @InjectRepository(MealTopUp) private topUpRepo: Repository<MealTopUp>,
     private notify: NotificationService,
   ) {}
 
@@ -82,10 +84,16 @@ export class DeliveryService {
     const order = await this.orderRepo.findOne({ where: { id: d.orderId } });
     order.status = OrderStatus.OUT_FOR_DELIVERY;
     await this.orderRepo.save(order);
+    // 取货后：已确认/已贴标的临时加餐并入配送完成
+    await this.topUpRepo.update(
+      { orderId: order.id, status: In(['CONFIRMED', 'LABELLED']) },
+      { status: 'FULFILLED' },
+    );
+    const labels = (d.specialLabels || []).filter((l: any) => l.source === 'TOPUP');
     await this.notify.send({
       enterpriseId: order.enterpriseId,
       title: '团餐配送中',
-      content: `您的团餐单 ${order.orderNo} 已由仓配取货，正在配送途中`,
+      content: `您的团餐单 ${order.orderNo} 已由仓配取货，正在配送途中${labels.length ? `；本单含 ${labels.length} 枚特殊餐标（素食/过敏），请签收人按标签核对` : ''}`,
       type: 'ORDER', orderId: order.id,
     });
     return d;
@@ -126,8 +134,8 @@ export class DeliveryService {
     await this.orderRepo.save(order);
     await this.notify.send({
       enterpriseId: order.enterpriseId,
-      title: '团餐已送达',
-      content: `您的团餐单 ${order.orderNo} 已送达，请核对数量后签收`,
+      title: '团餐已送达，请按特殊餐标核对签收',
+      content: `您的团餐单 ${order.orderNo} 已送达，请核对数量${d.specialLabels?.length ? `与 ${d.specialLabels.length} 枚素食/过敏特殊餐标（按企业名单逐人核对）` : ''}后签收${d.topUpQty ? `，本单含临时追加 ${d.topUpQty} 份` : ''}`,
       type: 'ORDER', orderId: order.id,
     });
     return d;

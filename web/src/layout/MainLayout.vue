@@ -83,6 +83,7 @@ const MENU_BY_ROLE: Record<string, { path: string; title: string; icon: string }
   STORE: [
     { path: '/', title: '工作台', icon: 'Odometer' },
     { path: '/orders', title: '团餐订单', icon: 'Tickets' },
+    { path: '/picklist', title: '拣货清单', icon: 'List' },
     { path: '/inventory', title: '库存与临期', icon: 'Box' },
     { path: '/store-ops', title: '排班与到货', icon: 'Calendar' },
     { path: '/incidents', title: '异常工单', icon: 'Warning' },
