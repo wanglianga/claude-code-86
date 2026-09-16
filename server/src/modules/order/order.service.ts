@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { MealOrder, MealPlan, OrderStatus } from '../../entities/order.entity';
 import { Enterprise, Contract } from '../../entities/enterprise.entity';
 import { InventoryBatch } from '../../entities/inventory.entity';
@@ -29,6 +29,7 @@ export class OrderService {
     @InjectRepository(User) private userRepo: Repository<User>,
     private planService: PlanService,
     private notify: NotificationService,
+    private dataSource: DataSource,
   ) {}
 
   private genOrderNo() {
@@ -244,7 +245,13 @@ export class OrderService {
     return this.detail(id);
   }
 
-  /** 门店备货完成：按批次扣减库存（临期优先），生成配送任务 */
+  /**
+   * 门店备货完成（两阶段，保证库存与订单状态一致）：
+   * 阶段一：在同一库存快照上核验全部方案明细（纯内存试算，不落库）；
+   *         任一商品不足 → 订单与所有批次数量保持不变，仅建立缺货协同工单并通知门店/客服。
+   * 阶段二：全部满足 → 在一个事务里一次扣减完整批次、回写实际临期使用量、
+   *         推进订单为待取货并生成配送任务；任一写入失败整体回滚。
+   */
   async ready(id: number, user: User) {
     const order = await this.mustGet(id);
     this.mustStore(order, user);
@@ -255,36 +262,55 @@ export class OrderService {
       || await this.planRepo.findOne({ where: { orderId: id }, order: { version: 'DESC' } });
     if (!plan) throw new BadRequestException('缺少供餐方案');
 
-    // 扣减库存：同一商品按到期时间升序（临期优先出库）
+    // ===== 阶段一：库存快照核验（与方案引擎同一口径：送达时仍在保质期内） =====
+    const deliverAt = new Date(order.deliverAt);
+    const usableAfter = new Date(deliverAt.getTime() - 30 * 60 * 1000); // 送达前 30 分钟缓冲
+    const nearLimit = deliverAt.getTime() + 6 * 3600 * 1000;            // 临期口径：送达后 6 小时内到期
+    const productIds = (plan.items as any[]).map((i) => i.productId);
+    const batches = await this.batchRepo.find({
+      where: { storeId: order.storeId, productId: In(productIds), status: 'AVAILABLE' },
+      order: { expiresAt: 'ASC' }, // 临期优先出库
+    });
+    // 快照池：productId -> 批次队列（仅纳入送达时可用的批次）
+    const pools = new Map<number, { id: number; left: number; nearExpiry: boolean }[]>();
+    for (const b of batches) {
+      if (b.expiresAt <= usableAfter) continue; // 送达时已过期，不可用于本单
+      const list = pools.get(b.productId) || [];
+      list.push({ id: b.id, left: b.quantity, nearExpiry: b.expiresAt.getTime() <= nearLimit });
+      pools.set(b.productId, list);
+    }
+    const shortages: { name: string; lack: number }[] = [];
+    const allocations: { batchId: number; use: number }[] = [];
+    const nearUsedByProduct = new Map<number, number>();
     for (const item of plan.items as any[]) {
       let remain = item.quantity;
-      const batches = await this.batchRepo.find({
-        where: { storeId: order.storeId, productId: item.productId, status: 'AVAILABLE' },
-        order: { expiresAt: 'ASC' },
-      });
-      for (const b of batches) {
+      let nearUsed = 0;
+      for (const p of pools.get(item.productId) || []) {
         if (remain <= 0) break;
-        const use = Math.min(b.quantity, remain);
-        b.quantity -= use;
+        const use = Math.min(p.left, remain);
+        if (use <= 0) continue;
+        p.left -= use;
         remain -= use;
-        if (b.quantity === 0) b.status = 'DEPLETED';
-        await this.batchRepo.save(b);
+        allocations.push({ batchId: p.id, use });
+        if (p.nearExpiry) nearUsed += use;
       }
-      if (remain > 0) {
-        await this.autoIncident(order, 'STOCK_SHORTAGE', '备货时库存不足',
-          `商品「${item.name}」缺口 ${remain} 份，请门店补货或发起临期调拨，客服请跟进企业沟通`);
-        throw new BadRequestException(`商品「${item.name}」库存不足，缺口 ${remain} 份，已自动生成异常工单`);
-      }
+      nearUsedByProduct.set(item.productId, nearUsed);
+      if (remain > 0) shortages.push({ name: item.name, lack: remain });
     }
 
-    order.status = OrderStatus.READY;
-    await this.orderRepo.save(order);
+    // ===== 任一商品不足：不改订单、不改任何批次，仅建立缺货协同并通知 =====
+    if (shortages.length > 0) {
+      const desc = shortages.map((s) => `「${s.name}」缺口 ${s.lack} 份`).join('、');
+      await this.shortageIncident(order,
+        `备货核验未通过：${desc}。本次未扣减任何库存，请门店补货或发起临期调拨后重试备货，客服请跟进企业协调。`);
+      throw new BadRequestException(`库存不足：${desc}。已生成缺货协同工单，本次未扣减任何库存`);
+    }
 
-    // 生成配送任务并指派仓配（取当前任务最少者）
+    // ===== 阶段二：全部满足 → 单事务一次落库 =====
     const couriers = await this.userRepo.find({ where: { role: UserRole.LOGISTICS, active: true } });
     let courier: User = null;
     if (couriers.length) {
-      const counts = await Promise.all(couriers.map(async c => ({
+      const counts = await Promise.all(couriers.map(async (c) => ({
         c, n: await this.deliveryRepo.createQueryBuilder('d')
           .where('d.courierId = :id', { id: c.id })
           .andWhere("d.status NOT IN ('SIGNED','DELIVERED')").getCount(),
@@ -292,12 +318,43 @@ export class OrderService {
       counts.sort((a, b) => a.n - b.n);
       courier = counts[0].c;
     }
-    const delivery = this.deliveryRepo.create({
-      orderId: order.id,
-      courierId: courier?.id ?? null,
-      status: courier ? 'ASSIGNED' : 'PENDING',
+
+    // 回写方案的实际临期使用量（与真实出库批次一致，供归档核对）
+    plan.items = (plan.items as any[]).map((it) => ({
+      ...it,
+      nearExpiryQty: nearUsedByProduct.get(it.productId) || 0,
+    }));
+
+    await this.dataSource.transaction(async (em) => {
+      for (const a of allocations) {
+        // 事务内二次校验，防止并发下快照失效；不足则抛错整体回滚
+        const affected = await em.createQueryBuilder()
+          .update(InventoryBatch)
+          .set({ quantity: () => `quantity - ${a.use}` })
+          .where('id = :id AND quantity >= :use', { id: a.batchId, use: a.use })
+          .execute();
+        if (!affected.affected) {
+          throw new BadRequestException('库存刚刚被其它业务占用，请重试备货');
+        }
+        await em.createQueryBuilder()
+          .update(InventoryBatch)
+          .set({ status: 'DEPLETED' })
+          .where('id = :id AND quantity = 0', { id: a.batchId })
+          .execute();
+      }
+      await em.save(plan);
+      order.status = OrderStatus.READY;
+      await em.save(order);
+      await em.save(em.create(Delivery, {
+        orderId: order.id,
+        courierId: courier?.id ?? null,
+        status: courier ? 'ASSIGNED' : 'PENDING',
+      }));
     });
-    await this.deliveryRepo.save(delivery);
+
+    // 备货成功：此前的缺货协同工单自动办结，保持工单结论与库存一致
+    await this.resolveShortageIncident(order);
+
     if (courier) {
       await this.notify.send({
         userId: courier.id,
@@ -307,6 +364,51 @@ export class OrderService {
       });
     }
     return this.detail(id);
+  }
+
+  /** 缺货协同：有未结缺货工单则更新，否则新建；并通知门店与客服 */
+  private async shortageIncident(order: MealOrder, description: string) {
+    const open = await this.incidentRepo.findOne({
+      where: { orderId: order.id, type: 'STOCK_SHORTAGE', status: In(['OPEN', 'PROCESSING']) },
+    });
+    if (open) {
+      open.description = description;
+      await this.incidentRepo.save(open);
+      await this.incidentLogRepo.save(this.incidentLogRepo.create({
+        incidentId: open.id, actorId: 0, actorName: '系统', actorRole: '系统',
+        action: 'COMMENT', note: `备货再次核验仍未通过：${description}`,
+      }));
+    } else {
+      await this.autoIncident(order, 'STOCK_SHORTAGE', '备货库存不足', description);
+    }
+    await this.notify.send({
+      role: 'STORE', storeId: order.storeId,
+      title: '备货缺货，请补货或调拨',
+      content: `团餐单 ${order.orderNo} ${description}`,
+      type: 'INVENTORY', orderId: order.id,
+    });
+  }
+
+  /** 备货成功后自动办结缺货工单，保证工单结论与库存事实一致 */
+  private async resolveShortageIncident(order: MealOrder) {
+    const open = await this.incidentRepo.findOne({
+      where: { orderId: order.id, type: 'STOCK_SHORTAGE', status: In(['OPEN', 'PROCESSING']) },
+    });
+    if (!open) return;
+    open.status = 'RESOLVED';
+    open.resolution = '补货/调拨后备货成功：已一次性扣减完整批次并生成配送任务';
+    await this.incidentRepo.save(open);
+    await this.incidentLogRepo.save(this.incidentLogRepo.create({
+      incidentId: open.id, actorId: 0, actorName: '系统', actorRole: '系统',
+      action: 'RESOLVE', note: open.resolution,
+    }));
+    const remaining = await this.incidentRepo.createQueryBuilder('i')
+      .where('i.orderId = :oid AND i.id != :id AND i.status IN (:...st)',
+        { oid: order.id, id: open.id, st: ['OPEN', 'PROCESSING'] })
+      .getCount();
+    if (remaining === 0) {
+      await this.orderRepo.update({ id: order.id }, { hasException: false });
+    }
   }
 
   /** 企业签收：记录实际人数、退货，归档 */
