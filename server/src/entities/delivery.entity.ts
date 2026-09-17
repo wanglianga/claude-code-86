@@ -68,6 +68,14 @@ export class Delivery {
   @Column({ default: 0 })
   topUpQty: number;
 
+  /** 临期调拨份数（优先装配/温控核对） */
+  @Column({ default: 0 })
+  nearExpiryQty: number;
+
+  /** 临期调拨温控要求快照（按温区：在途温度/到货中心温度上限/食用时限） */
+  @Column({ type: 'jsonb', default: {} })
+  nearExpiryTempControl: any;
+
   @CreateDateColumn()
   createdAt: Date;
 }

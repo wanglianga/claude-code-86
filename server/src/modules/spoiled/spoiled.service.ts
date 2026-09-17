@@ -12,6 +12,7 @@ import { Incident, IncidentLog } from '../../entities/incident.entity';
 import { Archive, Feedback } from '../../entities/archive.entity';
 import { Delivery } from '../../entities/delivery.entity';
 import { User, UserRole, ROLE_NAMES } from '../../entities/user.entity';
+import { NearExpiryOffer, NearExpiryOfferStatus } from '../../entities/near-expiry.entity';
 import { NotificationService } from '../notification/notification.service';
 
 /** 下架任务处理时限（小时） */
@@ -41,6 +42,7 @@ export class SpoiledService {
     @InjectRepository(Feedback) private feedbackRepo: Repository<Feedback>,
     @InjectRepository(Delivery) private deliveryRepo: Repository<Delivery>,
     @InjectRepository(User) private userRepo: Repository<User>,
+    @InjectRepository(NearExpiryOffer) private offerRepo: Repository<NearExpiryOffer>,
     private notify: NotificationService,
   ) {}
 
@@ -79,23 +81,104 @@ export class SpoiledService {
     });
     const products = await this.productRepo.find();
     const pmap = new Map(products.map(p => [p.id, p]));
+
+    // 企业已确认的临期调拨标记（提交售后前提示：临期份不认定为质量问题）
+    const offer = await this.offerRepo.findOne({
+      where: { orderId: order.id, status: In([NearExpiryOfferStatus.ACCEPTED, NearExpiryOfferStatus.FULFILLED]) },
+      order: { id: 'DESC' },
+    });
+    const usedCodes = new Set<string>();
+    const priorReports = await this.reportRepo.find({ where: { orderId: order.id } });
+    for (const r of priorReports) {
+      for (const m of r.nearExpiryMatch?.matched || []) (m.labelCodes || []).forEach((c: string) => usedCodes.add(c));
+    }
+    const nearUnits = (offer?.units || []).filter((u: any) => !usedCodes.has(u.labelCode));
+    const nearByProductBatch = new Map<string, any[]>();
+    for (const u of nearUnits) {
+      const key = `${u.productId}-${u.batchId}`;
+      const list = nearByProductBatch.get(key) || [];
+      list.push(u);
+      nearByProductBatch.set(key, list);
+    }
+
     return {
       order: {
         id: order.id, orderNo: order.orderNo, status: order.status,
         storeId: order.storeId, contactName: order.contactName,
       },
       deliveredAt: delivery?.deliveredAt || delivery?.pickedAt || order.deliverAt,
+      nearExpiryOffer: offer ? {
+        offerNo: offer.offerNo,
+        discountReason: offer.discountReason,
+        afterSalesPolicy: offer.afterSalesPolicy,
+        tempControl: offer.tempControl,
+        totalUnits: (offer.units || []).length,
+      } : null,
       items: (plan?.items || []).map((i: any) => ({
         productId: i.productId, name: i.name, category: i.category,
         unitPrice: i.unitPrice, vegetarian: i.vegetarian,
+        nearExpiryQty: i.nearExpiryQty || 0,
       })),
       batches: batches.map(b => ({
         batchId: b.id, batchNo: b.batchNo, productId: b.productId,
         productName: pmap.get(b.productId)?.name,
         producedAt: b.producedAt, expiresAt: b.expiresAt,
         quantity: b.quantity, tempZone: b.tempZone, status: b.status,
+        nearExpiryLabels: (nearByProductBatch.get(`${b.productId}-${b.id}`) || []).map((u: any) => u.labelCode),
       })),
     };
+  }
+
+  /**
+   * 临期调拨识别：把售后商品与企业已确认方案的「每份临期标记」核对。
+   * 临期属性本身不认定为质量问题（企业确认已入月结附件/售后说明）。
+   * 返回 {matched, qualityItems, nearTotal, offer}；matched 记录命中的每份标签。
+   */
+  private async matchNearExpiry(order: MealOrder, rawItems: any[]) {
+    const offer = await this.offerRepo.findOne({
+      where: { orderId: order.id, status: In([NearExpiryOfferStatus.ACCEPTED, NearExpiryOfferStatus.FULFILLED]) },
+      order: { id: 'DESC' },
+    });
+    if (!offer || !(offer.units || []).length) {
+      return { offer: null, matched: [], qualityItems: rawItems, nearTotal: 0, usedCodes: new Set<string>() };
+    }
+    // 已被其它售后单引用过的临期标签（同一份餐食不重复受理）
+    const prevReports = await this.reportRepo.find({ where: { orderId: order.id } });
+    const usedCodes = new Set<string>();
+    for (const r of prevReports) {
+      for (const m of r.nearExpiryMatch?.matched || []) {
+        (m.labelCodes || []).forEach((c: string) => usedCodes.add(c));
+      }
+    }
+    const matched: any[] = [];
+    const qualityItems: any[] = [];
+    let nearTotal = 0;
+    for (const it of rawItems) {
+      const cand = (offer.units || [])
+        .filter((u: any) => u.productId === +it.productId && u.batchId === +it.batchId && !usedCodes.has(u.labelCode));
+      const nearQty = Math.min(+it.qty, cand.length);
+      const qualityQty = +it.qty - nearQty;
+      if (nearQty > 0) {
+        const codes = cand.slice(0, nearQty).map((u: any) => u.labelCode);
+        codes.forEach((c: string) => usedCodes.add(c));
+        matched.push({
+          productId: +it.productId,
+          name: it.name,
+          batchId: +it.batchId,
+          batchNo: cand[0].batchNo,
+          qty: nearQty,
+          labelCodes: codes,
+          offerNo: offer.offerNo,
+          tempZone: cand[0].tempZone,
+          paidUnitPrice: cand[0].paidUnitPrice,
+          reason: cand[0].reason,
+          afterSalesRule: cand[0].afterSalesRule,
+        });
+        nearTotal += nearQty;
+      }
+      if (qualityQty > 0) qualityItems.push({ ...it, qty: qualityQty });
+    }
+    return { offer, matched, qualityItems, nearTotal, usedCodes };
   }
 
   /** 第一步：企业员工反馈餐食变质，收集批次/签收时间/温控照片/食用人员 */
@@ -120,7 +203,36 @@ export class SpoiledService {
     const bmap = new Map(batches.map(b => [b.id, b]));
     const delivery = await this.deliveryRepo.findOne({ where: { orderId: order.id } });
 
-    const fullItems = items.map((i: any) => {
+    // ===== 临期调拨识别：已企业确认并逐份贴标的临期餐，不得把临期误认为质量问题 =====
+    const match = await this.matchNearExpiry(order, items);
+    const nearZones = new Set(match.matched.map((m: any) => m.tempZone));
+    const tempFailure = dto.issueType === 'TEMP' || (dto.photos || []).some((p: any) =>
+      (nearZones.has('HOT') && p.coreTemp != null && p.coreTemp < 60)
+      || ((nearZones.has('CHILLED') || nearZones.has('FROZEN')) && p.surfaceTemp != null && p.surfaceTemp > 8));
+    if (match.nearTotal > 0 && match.qualityItems.length === 0 && !tempFailure) {
+      const labels = match.matched.flatMap((m: any) => m.labelCodes).slice(0, 10).join('、');
+      throw new BadRequestException(
+        `您反馈的 ${match.nearTotal} 份均为企业已确认的临期调拨餐食（方案 ${match.offer.offerNo}，每份标签 ${labels} 等）。`
+        + `临期属性（剩余保质期较短、折扣价格）不属于质量问题，售后规则与企业确认已随月结附件留存：`
+        + `请确认是否在送达后 2 小时建议食用时限内食用。若签收当场温控不合格（热链中心<60℃/冷藏表面>8℃）或包装破损、保质期内确有变质异味，`
+        + `请上传测温照片/包装凭证后重新提交，客服将按质量售后处理。`,
+      );
+    }
+    // 部分命中：售后单仅受理非临期份；命中的临期份记入说明，避免后续赔付/下架误伤
+    const effectiveItems = match.qualityItems.length ? match.qualityItems : items;
+    const nearMatchSnapshot = match.nearTotal ? {
+      offerNo: match.offer.offerNo,
+      matched: match.matched,
+      nearExpiryTotalQty: match.nearTotal,
+      excludedQty: tempFailure ? 0 : match.nearTotal,
+      tempFailure,
+      acknowledgedAll: match.qualityItems.length === 0,
+      note: tempFailure
+        ? '命中的临期份提供了温控不合格举证（热链中心<60℃/冷藏表面>8℃），按质量售后正常受理，临期标记不影响质量认定'
+        : `其中 ${match.nearTotal} 份为企业已确认的临期调拨餐食（每份贴标、确认入月结附件），临期属性不认定为质量问题，已从退款/补送/同批次下架范围中剔除`,
+    } : {};
+
+    const fullItems = effectiveItems.map((i: any) => {
       const p = pmap.get(+i.productId);
       const b = bmap.get(+i.batchId);
       return {
@@ -149,6 +261,7 @@ export class SpoiledService {
       status: 'OPEN',
       refundMultiplier: +dto.refundMultiplier || 2,
       createdBy: user.id,
+      nearExpiryMatch: nearMatchSnapshot,
     });
     const saved = await this.reportRepo.save(report);
 
@@ -172,6 +285,14 @@ export class SpoiledService {
     saved.incidentId = incident.id;
     await this.reportRepo.save(saved);
     await this.incidentLog(incident.id, user, 'CREATED', `企业提交变质售后单 ${saved.reportNo}（批次/签收时间/温控照片/食用人员已收集）`);
+    if (match.nearTotal > 0 && !tempFailure) {
+      await this.incidentLog(incident.id, user, 'COMMENT',
+        `临期调拨识别：售后申报中有 ${match.nearTotal} 份命中企业已确认临期调拨方案 ${match.offer.offerNo}（每份标签已贴、确认入月结附件），`
+        + `按售后规则不认定为质量问题，已从受理/退款/补送/同批次下架范围中剔除；实际受理 ${fullItems.reduce((s: number, i: any) => s + i.qty, 0)} 份`);
+    } else if (match.nearTotal > 0 && tempFailure) {
+      await this.incidentLog(incident.id, user, 'COMMENT',
+        `临期调拨识别：${match.nearTotal} 份命中临期方案 ${match.offer.offerNo}，但企业提供温控不合格举证，按质量售后正常受理（临期标记不作为免责依据）`);
+    }
 
     order.hasException = true;
     await this.orderRepo.save(order);

@@ -11,6 +11,7 @@ import { Archive, Feedback } from '../../entities/archive.entity';
 import { User, UserRole } from '../../entities/user.entity';
 import { MealTopUp } from '../../entities/topup.entity';
 import { SpoiledReport } from '../../entities/spoiled.entity';
+import { NearExpiryOffer, NearExpiryOfferStatus } from '../../entities/near-expiry.entity';
 import { PlanService } from './plan.service';
 import { NotificationService } from '../notification/notification.service';
 
@@ -31,6 +32,7 @@ export class OrderService {
     @InjectRepository(User) private userRepo: Repository<User>,
     @InjectRepository(MealTopUp) private topUpRepo: Repository<MealTopUp>,
     @InjectRepository(SpoiledReport) private spoiledRepo: Repository<SpoiledReport>,
+    @InjectRepository(NearExpiryOffer) private nearExpiryOfferRepo: Repository<NearExpiryOffer>,
     private planService: PlanService,
     private notify: NotificationService,
     private dataSource: DataSource,
@@ -131,6 +133,7 @@ export class OrderService {
     const archive = await this.archiveRepo.findOne({ where: { orderId: id } });
     const topUps = await this.topUpRepo.find({ where: { orderId: id }, order: { id: 'DESC' } });
     const spoiledReports = await this.spoiledRepo.find({ where: { orderId: id }, order: { id: 'DESC' } });
+    const nearExpiryOffers = await this.nearExpiryOfferRepo.find({ where: { orderId: id }, order: { id: 'DESC' } });
     let courierName: string = null;
     let extraCourierName: string = null;
     if (delivery?.courierId) {
@@ -152,6 +155,7 @@ export class OrderService {
       archive,
       topUps: topUps.filter(t => t.status !== 'CANCELLED'),
       spoiledReports,
+      nearExpiryOffers,
     };
   }
 
@@ -166,6 +170,11 @@ export class OrderService {
     await this.planRepo.save(plan);
     order.status = OrderStatus.CONFIRMED;
     await this.orderRepo.save(order);
+    // 企业按正常方案下单：未接受的临期折扣推荐自动失效
+    await this.nearExpiryOfferRepo.update(
+      { orderId: id, status: NearExpiryOfferStatus.PROPOSED },
+      { status: NearExpiryOfferStatus.EXPIRED, expiredAt: new Date(), expireReason: '企业已按正常方案确认下单' },
+    );
     await this.notify.send({
       role: 'STORE', storeId: order.storeId,
       title: '团餐订单已确认，请备货',
@@ -185,6 +194,11 @@ export class OrderService {
     const oldPlans = await this.planRepo.find({ where: { orderId: id } });
     const exclude = oldPlans.map(p => p.storeId);
     for (const p of oldPlans) { p.status = 'REJECTED'; await this.planRepo.save(p); }
+    // 换店重算：原门店的临期折扣推荐随之失效
+    await this.nearExpiryOfferRepo.update(
+      { orderId: id, status: NearExpiryOfferStatus.PROPOSED },
+      { status: NearExpiryOfferStatus.EXPIRED, expiredAt: new Date(), expireReason: '企业更换供餐门店，方案重新生成' },
+    );
     const result = await this.planService.persistPlan(order, exclude);
     if (!result.ok) {
       // 没有其它门店可选：恢复最新方案为待确认
@@ -210,6 +224,10 @@ export class OrderService {
     }
     order.status = OrderStatus.CANCELLED;
     await this.orderRepo.save(order);
+    await this.nearExpiryOfferRepo.update(
+      { orderId: id, status: NearExpiryOfferStatus.PROPOSED },
+      { status: NearExpiryOfferStatus.EXPIRED, expiredAt: new Date(), expireReason: '团餐单已取消' },
+    );
     await this.notify.send({
       role: 'STORE', storeId: order.storeId,
       title: '团餐订单已取消',
@@ -280,36 +298,71 @@ export class OrderService {
     const usableAfter = new Date(deliverAt.getTime() - 30 * 60 * 1000); // 送达前 30 分钟缓冲
     const nearLimit = deliverAt.getTime() + 6 * 3600 * 1000;            // 临期口径：送达后 6 小时内到期
     const productIds = (plan.items as any[]).map((i) => i.productId);
-    const batches = await this.batchRepo.find({
-      where: { storeId: order.storeId, productId: In(productIds), status: 'AVAILABLE' },
-      order: { expiresAt: 'ASC' }, // 临期优先出库
-    });
-    // 快照池：productId -> 批次队列（仅纳入送达时可用的批次）
-    const pools = new Map<number, { id: number; left: number; nearExpiry: boolean }[]>();
-    for (const b of batches) {
-      if (b.expiresAt <= usableAfter) continue; // 送达时已过期，不可用于本单
-      const list = pools.get(b.productId) || [];
-      list.push({ id: b.id, left: b.quantity, nearExpiry: b.expiresAt.getTime() <= nearLimit });
-      pools.set(b.productId, list);
-    }
-    const shortages: { name: string; lack: number }[] = [];
-    const allocations: { batchId: number; use: number }[] = [];
+
+    // 企业已接受临期调拨折扣方案：按方案锁定批次优先出库（批次/温控/售后责任已写入团餐单）
+    const reserved: any[] = plan.reservedBatches || [];
+    const acceptedOffer = order.nearExpiryOfferId
+      ? await this.nearExpiryOfferRepo.findOne({ where: { id: order.nearExpiryOfferId } })
+      : null;
+    let shortages: { name: string; lack: number }[] = [];
+    let allocations: { batchId: number; use: number }[] = [];
     const nearUsedByProduct = new Map<number, number>();
-    for (const item of plan.items as any[]) {
-      let remain = item.quantity;
-      let nearUsed = 0;
-      for (const p of pools.get(item.productId) || []) {
-        if (remain <= 0) break;
-        const use = Math.min(p.left, remain);
-        if (use <= 0) continue;
-        p.left -= use;
-        remain -= use;
-        allocations.push({ batchId: p.id, use });
-        if (p.nearExpiry) nearUsed += use;
+
+    if (reserved.length && acceptedOffer?.status === NearExpiryOfferStatus.ACCEPTED) {
+      const lockedBatches = await this.batchRepo.find({
+        where: { id: In(reserved.map(r => r.batchId)), storeId: order.storeId },
+      });
+      const bmap = new Map(lockedBatches.map(b => [b.id, b]));
+      for (const r of reserved) {
+        const b = bmap.get(r.batchId);
+        if (!b || b.status !== 'AVAILABLE' || b.quantity < r.quantity || b.expiresAt <= usableAfter) {
+          const item = (plan.items as any[]).find(i => i.productId === r.productId);
+          shortages.push({ name: item?.name || `商品${r.productId}`, lack: r.quantity });
+        }
       }
-      nearUsedByProduct.set(item.productId, nearUsed);
-      if (remain > 0) shortages.push({ name: item.name, lack: remain });
+      // 锁定数量须与方案明细一致
+      for (const item of plan.items as any[]) {
+        const lockedQty = reserved.filter(r => r.productId === item.productId).reduce((s, r) => s + r.quantity, 0);
+        if (lockedQty !== item.quantity) {
+          shortages.push({ name: item.name, lack: Math.abs(item.quantity - lockedQty) });
+        }
+      }
+      allocations = reserved.map(r => ({ batchId: r.batchId, use: r.quantity }));
+      for (const r of reserved) {
+        if ((r.nearExpiryQty || 0) > 0) {
+          nearUsedByProduct.set(r.productId, (nearUsedByProduct.get(r.productId) || 0) + r.nearExpiryQty);
+        }
+      }
+    } else {
+      const batches = await this.batchRepo.find({
+        where: { storeId: order.storeId, productId: In(productIds), status: 'AVAILABLE' },
+        order: { expiresAt: 'ASC' }, // 临期优先出库
+      });
+      // 快照池：productId -> 批次队列（仅纳入送达时可用的批次）
+      const pools = new Map<number, { id: number; left: number; nearExpiry: boolean }[]>();
+      for (const b of batches) {
+        if (b.expiresAt <= usableAfter) continue; // 送达时已过期，不可用于本单
+        const list = pools.get(b.productId) || [];
+        list.push({ id: b.id, left: b.quantity, nearExpiry: b.expiresAt.getTime() <= nearLimit });
+        pools.set(b.productId, list);
+      }
+      for (const item of plan.items as any[]) {
+        let remain = item.quantity;
+        let nearUsed = 0;
+        for (const p of pools.get(item.productId) || []) {
+          if (remain <= 0) break;
+          const use = Math.min(p.left, remain);
+          if (use <= 0) continue;
+          p.left -= use;
+          remain -= use;
+          allocations.push({ batchId: p.id, use });
+          if (p.nearExpiry) nearUsed += use;
+        }
+        nearUsedByProduct.set(item.productId, nearUsed);
+        if (remain > 0) shortages.push({ name: item.name, lack: remain });
+      }
     }
+    shortages = shortages.filter((s, i, arr) => arr.findIndex(x => x.name === s.name) === i);
 
     // ===== 任一商品不足：不改订单、不改任何批次，仅建立缺货协同并通知 =====
     if (shortages.length > 0) {
@@ -373,6 +426,18 @@ export class OrderService {
         (t.specialDietRoster || []).map((l: any) => ({ ...l, source: 'TOPUP', topUpNo: t.topUpNo })));
       const topUpQty = topUps.reduce((s, t) => s + t.addHeadcount, 0);
       const extraDispatch = topUps.some(t => t.extraCourierRequired);
+
+      // 临期调拨：份数与温控方案同步配送员（优先装配、随车温控单、签收测温）
+      const nearExpiryQty = (plan.items as any[]).reduce((s, it) => s + (it.nearExpiryQty || 0), 0);
+      const nearExpiryTempControl = acceptedOffer
+        ? {
+          offerNo: acceptedOffer.offerNo,
+          zones: acceptedOffer.tempControl?.zones || [],
+          rules: acceptedOffer.tempControl?.rules || [],
+          unitLabelCount: (acceptedOffer.units || []).length,
+        }
+        : {};
+
       await em.save(em.create(Delivery, {
         orderId: order.id,
         courierId: courier?.id ?? null,
@@ -381,7 +446,16 @@ export class OrderService {
         topUpQty,
         extraDispatch,
         extraCourierId: extraDispatch ? (topUps.find(t => t.extraCourierId)?.extraCourierId ?? null) : null,
+        nearExpiryQty,
+        nearExpiryTempControl,
       }));
+
+      // 临期调拨方案随单履约
+      if (acceptedOffer && acceptedOffer.status === NearExpiryOfferStatus.ACCEPTED) {
+        acceptedOffer.status = NearExpiryOfferStatus.FULFILLED;
+        acceptedOffer.fulfilledAt = new Date();
+        await em.save(acceptedOffer);
+      }
     });
 
     // 备货成功：此前的缺货协同工单自动办结，保持工单结论与库存一致
@@ -489,6 +563,12 @@ export class OrderService {
       }
     }
     const nearExpiryUsed = archiveItems.reduce((s: number, i: any) => s + (i.nearExpiryQty || 0), 0);
+    // 企业已确认临期调拨方案的折扣节省（随交付档案留存，供月结与售后核对）
+    const acceptedOffer = await this.nearExpiryOfferRepo.findOne({
+      where: { orderId: order.id, status: In(['ACCEPTED', 'FULFILLED']) },
+      order: { id: 'DESC' },
+    });
+    const nearExpirySavings = acceptedOffer ? Number(acceptedOffer.savingsAmount || 0) : 0;
 
     const archive = this.archiveRepo.create({
       orderId: order.id,
@@ -499,6 +579,7 @@ export class OrderService {
       returnCount,
       returnAmount,
       nearExpiryUsed,
+      nearExpirySavings,
       compensation,
       onTime,
       incidentCount: incidents.length,

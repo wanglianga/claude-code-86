@@ -122,6 +122,15 @@ export class SpoiledReport {
   @Column({ nullable: true })
   createdBy: number;
 
+  /**
+   * 临期调拨识别快照（创建售后时按团餐单的企业确认方案判定）：
+   * {matched:[{productId,name,batchId,batchNo,qty,labelCodes:[...],reason,afterSalesRule}],
+   *  nearExpiryTotalQty, acknowledgedAll:boolean, blocked:boolean, note}
+   * 企业已确认的临期份不认定为质量问题，客服不得对其发起食安赔付/同批次下架。
+   */
+  @Column({ type: 'jsonb', default: {} })
+  nearExpiryMatch: any;
+
   @CreateDateColumn()
   createdAt: Date;
 }

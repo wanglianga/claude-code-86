@@ -122,6 +122,10 @@ export class MealOrder {
   @Column({ nullable: true })
   settlementId: number;
 
+  /** 当前生效的临期调拨折扣方案（企业已接受） */
+  @Column({ nullable: true })
+  nearExpiryOfferId: number;
+
   @CreateDateColumn()
   createdAt: Date;
 
@@ -155,6 +159,33 @@ export class MealPlan {
   /** 门店平衡提醒（团餐 vs 散客 vs 临期） */
   @Column({ type: 'jsonb', default: [] })
   warnings: string[];
+
+  /**
+   * 临期调拨锁定批次（企业接受折扣方案后写入，备货按此优先扣减）
+   * [{batchId, productId, quantity}]
+   */
+  @Column({ type: 'jsonb', default: [] })
+  reservedBatches: any[];
+
+  /** 关联临期调拨折扣方案号 offerNo（企业确认凭证） */
+  @Column({ nullable: true })
+  nearExpiryOfferNo: string;
+
+  /** 临期折扣原因（企业端可见） */
+  @Column({ type: 'text', nullable: true })
+  discountReason: string;
+
+  /** 温控方案快照 */
+  @Column({ type: 'jsonb', default: {} })
+  tempControl: any;
+
+  /** 售后责任划分快照（企业确认，后续售后不能把临期误认为质量问题） */
+  @Column({ type: 'jsonb', default: {} })
+  afterSalesPolicy: any;
+
+  /** 每份餐食的临期调拨标记（贴标到每份餐食） */
+  @Column({ type: 'jsonb', default: [] })
+  unitLabels: any[];
 
   @Column({ default: 1 })
   version: number;

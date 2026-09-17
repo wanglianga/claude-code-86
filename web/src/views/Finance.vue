@@ -47,6 +47,14 @@
             <el-table-column prop="month" label="账期" width="100" />
             <el-table-column v-if="auth.role !== 'ENTERPRISE'" prop="enterpriseName" label="企业" min-width="140" />
             <el-table-column prop="orderCount" label="团餐单数" width="90" align="center" />
+            <el-table-column label="临期确认附件" width="120" align="center">
+              <template #default="{ row }">
+                <el-button v-if="row.attachmentCount" link type="primary" @click="viewAttachments(row)">
+                  {{ row.attachmentCount }} 份
+                </el-button>
+                <span v-else class="muted">-</span>
+              </template>
+            </el-table-column>
             <el-table-column label="金额" width="130" align="right">
               <template #default="{ row }">{{ fmtMoney(row.totalAmount) }}</template>
             </el-table-column>
@@ -86,17 +94,62 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="ordersVisible" title="月结单明细" width="640px">
+    <el-dialog v-model="ordersVisible" title="月结单明细" width="760px">
       <el-table :data="settlementOrders" size="small" border>
         <el-table-column prop="orderNo" label="团餐单号" width="150" class-name="mono" />
         <el-table-column label="送达时间" width="150">
           <template #default="{ row }">{{ fmtTime(row.deliverAt) }}</template>
         </el-table-column>
         <el-table-column prop="headcount" label="人数" width="70" align="center" />
+        <el-table-column label="临期调拨" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.nearExpiryOfferId" size="small" type="warning" effect="dark">已贴标</el-tag>
+            <span v-else class="muted">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="实付金额" align="right">
           <template #default="{ row }">{{ fmtMoney(row.actualAmount ?? row.totalAmount) }}</template>
         </el-table-column>
       </el-table>
+
+      <div v-if="settlementAttachments.length" style="margin-top:14px">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">
+          月结附件 · 临期调拨企业确认（{{ settlementAttachments.length }}）
+        </div>
+        <el-table :data="settlementAttachments" size="small" border>
+          <el-table-column prop="attachmentNo" label="附件号" width="140" class-name="mono" />
+          <el-table-column prop="orderNo" label="团餐单" width="140" class-name="mono" />
+          <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
+          <el-table-column label="操作" width="90" align="center">
+            <template #default="{ row }">
+              <el-button size="small" @click="openAttachment(row)">查看确认</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </el-dialog>
+
+    <el-dialog v-model="attachmentVisible" title="月结附件 · 临期调拨企业确认" width="720px" append-to-body top="6vh">
+      <div v-if="attachment">
+        <el-descriptions :column="2" border size="small">
+          <el-descriptions-item label="附件号">{{ attachment.attachmentNo }}</el-descriptions-item>
+          <el-descriptions-item label="账期">{{ attachment.month }}</el-descriptions-item>
+          <el-descriptions-item label="方案号">{{ attachment.snapshot.offerNo }}</el-descriptions-item>
+          <el-descriptions-item label="确认人/时间">
+            {{ attachment.snapshot.acceptedBy }} · {{ fmtTime(attachment.snapshot.acceptedAt) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="临期份数">
+            {{ attachment.snapshot.nearExpiryQty }} / {{ attachment.snapshot.totalQty }} 份
+          </el-descriptions-item>
+          <el-descriptions-item label="折扣金额">
+            {{ fmtMoney(attachment.snapshot.amountBefore) }} → <b style="color:#ff6a00">{{ fmtMoney(attachment.snapshot.offerAmount) }}</b>
+          </el-descriptions-item>
+          <el-descriptions-item label="确认说明" :span="2">{{ attachment.snapshot.acceptanceNote }}</el-descriptions-item>
+          <el-descriptions-item label="折扣原因" :span="2">{{ attachment.snapshot.discountReason }}</el-descriptions-item>
+        </el-descriptions>
+        <el-alert type="success" :closable="false" show-icon style="margin-top:10px"
+          title="售后说明（企业确认留存）" :description="attachment.snapshot.afterSalesPolicy?.statement" />
+      </div>
     </el-dialog>
   </div>
 </template>
@@ -118,6 +171,9 @@ const reissueVisible = ref(false)
 const reissueForm = reactive<any>({ id: 0, title: '', taxNo: '' })
 const ordersVisible = ref(false)
 const settlementOrders = ref<any[]>([])
+const settlementAttachments = ref<any[]>([])
+const attachmentVisible = ref(false)
+const attachment = ref<any>(null)
 
 async function load() {
   invoices.value = await http.get('/finance/invoices')
@@ -175,7 +231,17 @@ async function pay(row: any) {
 
 async function viewOrders(row: any) {
   settlementOrders.value = await http.get(`/finance/settlements/${row.id}/orders`)
+  settlementAttachments.value = await http.get(`/finance/settlements/${row.id}/attachments`)
   ordersVisible.value = true
+}
+
+async function viewAttachments(row: any) {
+  await viewOrders(row)
+}
+
+function openAttachment(row: any) {
+  attachment.value = row
+  attachmentVisible.value = true
 }
 
 onMounted(load)

@@ -124,6 +124,14 @@ export const SETTLEMENT_STATUS: Record<string, { name: string; type: string }> =
   PAID: { name: '已回款', type: 'success' },
 }
 
+export const NEAR_EXPIRY_OFFER_STATUS: Record<string, { name: string; type: string }> = {
+  PROPOSED: { name: '待企业确认', type: 'warning' },
+  ACCEPTED: { name: '企业已接受', type: 'success' },
+  REJECTED: { name: '企业已拒绝', type: 'info' },
+  FULFILLED: { name: '已随单履约', type: 'success' },
+  EXPIRED: { name: '已失效', type: 'info' },
+}
+
 export const DELIVERY_STATUS: Record<string, { name: string; type: string }> = {
   PENDING: { name: '待指派', type: 'info' },
   ASSIGNED: { name: '已指派', type: 'primary' },

@@ -40,6 +40,12 @@ export class FinanceController {
     return this.svc.settlementOrders(+id);
   }
 
+  @Get('settlements/:id/attachments')
+  @Roles(UserRole.FINANCE, UserRole.ADMIN, UserRole.ENTERPRISE)
+  settlementAttachments(@Param('id') id: string) {
+    return this.svc.settlementAttachments(+id);
+  }
+
   @Post('settlements/generate')
   @Roles(UserRole.FINANCE, UserRole.ADMIN)
   generate(@Body() dto: any) {

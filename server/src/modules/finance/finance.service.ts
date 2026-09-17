@@ -1,11 +1,12 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { In, Repository, IsNull } from 'typeorm';
 import { Invoice, Settlement } from '../../entities/finance.entity';
 import { MealOrder, OrderStatus } from '../../entities/order.entity';
 import { Enterprise, Contract } from '../../entities/enterprise.entity';
 import { Archive } from '../../entities/archive.entity';
 import { Incident } from '../../entities/incident.entity';
+import { SettlementAttachment } from '../../entities/near-expiry.entity';
 import { User, UserRole } from '../../entities/user.entity';
 import { NotificationService } from '../notification/notification.service';
 
@@ -19,6 +20,7 @@ export class FinanceService {
     @InjectRepository(Contract) private contractRepo: Repository<Contract>,
     @InjectRepository(Archive) private archiveRepo: Repository<Archive>,
     @InjectRepository(Incident) private incidentRepo: Repository<Incident>,
+    @InjectRepository(SettlementAttachment) private attachmentRepo: Repository<SettlementAttachment>,
     private notify: NotificationService,
   ) {}
 
@@ -109,6 +111,19 @@ export class FinanceService {
       o.settlementId = saved.id;
       await this.orderRepo.save(o);
     }
+    // 临期调拨企业确认等附件挂入账期（企业确认已在接受方案时预归档）
+    const orderIds = inMonth.map(o => o.id);
+    if (orderIds.length) {
+      const attachments = await this.attachmentRepo.find({
+        where: { enterpriseId, month, orderId: In(orderIds) },
+      });
+      for (const a of attachments) {
+        a.settlementId = saved.id;
+        await this.attachmentRepo.save(a);
+      }
+      saved.attachmentCount = await this.attachmentRepo.count({ where: { settlementId: saved.id } });
+      await this.settlementRepo.save(saved);
+    }
     return saved;
   }
 
@@ -124,6 +139,14 @@ export class FinanceService {
 
   async settlementOrders(id: number) {
     return this.orderRepo.find({ where: { settlementId: id } });
+  }
+
+  /** 月结附件（临期调拨企业确认记录等），供企业确认账单与财务开票时核对 */
+  async settlementAttachments(id: number) {
+    const list = await this.attachmentRepo.find({ where: { settlementId: id }, order: { id: 'DESC' } });
+    const orders = await this.orderRepo.find();
+    const omap = new Map(orders.map(o => [o.id, o]));
+    return list.map(a => ({ ...a, orderNo: omap.get(a.orderId)?.orderNo }));
   }
 
   /** 企业确认月结单 */

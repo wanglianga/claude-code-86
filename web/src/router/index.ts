@@ -14,6 +14,7 @@ const routes = [
       { path: 'inventory', component: () => import('../views/Inventory.vue') },
       { path: 'picklist', component: () => import('../views/PickList.vue') },
       { path: 'aftersales', component: () => import('../views/AfterSales.vue') },
+      { path: 'near-expiry', component: () => import('../views/NearExpiry.vue') },
       { path: 'store-aftersales', component: () => import('../views/StoreAfterSales.vue') },
       { path: 'store-ops', component: () => import('../views/StoreOps.vue') },
       { path: 'deliveries', component: () => import('../views/Deliveries.vue') },

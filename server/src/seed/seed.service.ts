@@ -15,6 +15,7 @@ import { Invoice, Settlement } from '../entities/finance.entity';
 import { Archive, Feedback } from '../entities/archive.entity';
 import { MealTopUp } from '../entities/topup.entity';
 import { SpoiledReport, BatchRecall, RecallTask, Redelivery } from '../entities/spoiled.entity';
+import { NearExpiryOffer, NearExpiryOfferStatus, SettlementAttachment } from '../entities/near-expiry.entity';
 
 @Injectable()
 export class SeedService implements OnApplicationBootstrap {
@@ -44,6 +45,8 @@ export class SeedService implements OnApplicationBootstrap {
     @InjectRepository(BatchRecall) private recallRepo: Repository<BatchRecall>,
     @InjectRepository(RecallTask) private recallTaskRepo: Repository<RecallTask>,
     @InjectRepository(Redelivery) private redeliveryRepo: Repository<Redelivery>,
+    @InjectRepository(NearExpiryOffer) private offerRepo: Repository<NearExpiryOffer>,
+    @InjectRepository(SettlementAttachment) private attachmentRepo: Repository<SettlementAttachment>,
   ) {}
 
   async onApplicationBootstrap() {
@@ -573,5 +576,349 @@ export class SeedService implements OnApplicationBootstrap {
       incidentId: openIncident.id, actorId: users[8].id, actorName: '陈静', actorRole: '客服',
       action: 'COMMENT', note: '已受理：提出 2 倍批量退款 ¥88 待财务确认；补送单 BC-SEED01 已备货待骑手送达；同批次下架待触发',
     }));
+
+    await this.seedNearExpiry({
+      stores, ent1, ent2, contract1, P, pwd: '', users, cgUser, hyUser,
+    });
+  }
+
+  /** 临期鲜食优先调拨演示：①待企业确认推荐 ②已接受待备货 ③已归档可验证售后拦截 */
+  private async seedNearExpiry(ctx: any) {
+    const { stores, ent1, ent2, P, cgUser, hyUser } = ctx;
+
+    // 场景①：恒宇广告 20 人会议餐（+3h 送达，单结），中心旗舰店两批临期鲜食仍符合团餐时间窗
+    const deliverA = this.hoursFromNow(3);
+    const aBentoNear = await this.batchRepo.save(this.batchRepo.create({
+      batchNo: 'BN-A01', storeId: stores[0].id, productId: P('BENTO-01').id,
+      quantity: 24, initialQuantity: 24,
+      producedAt: new Date(Date.now() - 5 * 3600000),
+      expiresAt: new Date(deliverA.getTime() + 2 * 3600000), // 送达后 2 小时到期，5 折
+      tempZone: 'HOT', status: 'AVAILABLE',
+    }));
+    const aDrinkNear = await this.batchRepo.save(this.batchRepo.create({
+      batchNo: 'BN-A02', storeId: stores[0].id, productId: P('DRINK-01').id,
+      quantity: 10, initialQuantity: 10,
+      producedAt: new Date(Date.now() - 22 * 3600000),
+      expiresAt: new Date(deliverA.getTime() + 2 * 3600000), // 送达后 2 小时到期，5 折
+      tempZone: 'CHILLED', status: 'AVAILABLE',
+    }));
+    const aDrinkNormal = await this.batchRepo.save(this.batchRepo.create({
+      batchNo: 'BN-A03', storeId: stores[0].id, productId: P('DRINK-01').id,
+      quantity: 20, initialQuantity: 20,
+      producedAt: new Date(Date.now() - 1 * 3600000),
+      expiresAt: new Date(deliverA.getTime() + 23 * 3600000),
+      tempZone: 'CHILLED', status: 'AVAILABLE',
+    }));
+    const orderA = await this.orderRepo.save(this.orderRepo.create({
+      orderNo: 'TM2026091706', enterpriseId: ent2.id, storeId: stores[0].id,
+      occasion: 'MEETING', headcount: 20, mealBudget: 30, vegetarianCount: 0, allergies: ['花生'],
+      deliverAt: deliverA, address: ent2.address, contactName: '李强', contactPhone: '13900003333',
+      backupContactName: '赵敏', backupContactPhone: '13900004444',
+      invoiceRequired: true, invoiceTitle: ent2.invoiceTitle, taxNo: ent2.taxNo,
+      remark: '临期折扣推荐演示单：平台已推荐折扣方案，待企业行政确认',
+      status: OrderStatus.PENDING_CONFIRM, totalAmount: 560, createdBy: hyUser.id,
+    }));
+    const planAItems = [
+      { productId: P('BENTO-01').id, name: '黑椒牛柳便当', category: 'BENTO', quantity: 20, unitPrice: 22, nearExpiryQty: 0, vegetarian: false },
+      { productId: P('DRINK-01').id, name: '鲜榨橙汁', category: 'DRINK', quantity: 20, unitPrice: 6, nearExpiryQty: 0, vegetarian: true },
+    ];
+    await this.planRepo.save(this.planRepo.create({
+      orderId: orderA.id, storeId: stores[0].id, items: planAItems, totalPrice: 560,
+      reasons: ['优选「鲜达·中心旗舰店」供餐：库存与产能充足'], warnings: [],
+      version: 1, status: 'PROPOSED',
+    }));
+    const offerABuild = this.buildNearOffer({
+      offerNo: 'LN-SEED01', deliverAt: deliverA,
+      lines: [
+        { product: P('BENTO-01'), batch: aBentoNear, quantity: 20, nearQty: 20, unitPrice: 22, rate: 0.5 },
+        { product: P('DRINK-01'), batch: aDrinkNear, quantity: 10, nearQty: 10, unitPrice: 6, rate: 0.5 },
+        { product: P('DRINK-01'), batch: aDrinkNormal, quantity: 10, nearQty: 0, unitPrice: 6, rate: 1 },
+      ],
+    });
+    await this.offerRepo.save(this.offerRepo.create({
+      offerNo: 'LN-SEED01', orderId: orderA.id, enterpriseId: ent2.id, storeId: stores[0].id,
+      sourceType: 'PENDING_ORDER', status: NearExpiryOfferStatus.PROPOSED, proposedBy: 1,
+      discountRate: 0.5, totalQty: 40, nearExpiryQty: 30,
+      amountBefore: offerABuild.amountBefore, offerAmount: offerABuild.offerAmount, savingsAmount: offerABuild.savingsAmount,
+      items: offerABuild.items, batches: offerABuild.batches, units: offerABuild.units,
+      tempControl: offerABuild.tempControl, afterSalesPolicy: offerABuild.policy,
+      discountReason: offerABuild.reason, groupMealWindow: offerABuild.window,
+    }));
+
+    // 场景②：晨光科技 16 人加班餐（+5h 送达，月结 9.5 折），企业已接受折扣方案，待门店按锁定批次备货/贴标
+    const deliverB = this.hoursFromNow(5);
+    const bBentoNear = await this.batchRepo.save(this.batchRepo.create({
+      batchNo: 'BN-B01', storeId: stores[0].id, productId: P('BENTO-02').id,
+      quantity: 16, initialQuantity: 16,
+      producedAt: new Date(Date.now() - 6 * 3600000),
+      expiresAt: new Date(deliverB.getTime() + 2 * 3600000), // 送达后 2 小时到期，5 折
+      tempZone: 'HOT', status: 'AVAILABLE',
+    }));
+    const bDrinkNear = await this.batchRepo.save(this.batchRepo.create({
+      batchNo: 'BN-B02', storeId: stores[0].id, productId: P('DRINK-01').id,
+      quantity: 8, initialQuantity: 8,
+      producedAt: new Date(Date.now() - 21.5 * 3600000),
+      expiresAt: new Date(deliverB.getTime() + 2 * 3600000),
+      tempZone: 'CHILLED', status: 'AVAILABLE',
+    }));
+    const bDrinkNormal = await this.batchRepo.save(this.batchRepo.create({
+      batchNo: 'BN-B03', storeId: stores[0].id, productId: P('DRINK-01').id,
+      quantity: 12, initialQuantity: 12,
+      producedAt: new Date(Date.now() - 1 * 3600000),
+      expiresAt: new Date(deliverB.getTime() + 23 * 3600000),
+      tempZone: 'CHILLED', status: 'AVAILABLE',
+    }));
+    const orderB = await this.orderRepo.save(this.orderRepo.create({
+      orderNo: 'TM2026091707', enterpriseId: ent1.id, contractId: ctx.contract1.id, storeId: stores[0].id,
+      occasion: 'OVERTIME', headcount: 16, mealBudget: 30, vegetarianCount: 0, allergies: [],
+      deliverAt: deliverB, address: ent1.address, contactName: '王芳', contactPhone: '13800001111',
+      backupContactName: '刘洋', backupContactPhone: '13800002222',
+      invoiceRequired: true, invoiceTitle: ent1.invoiceTitle, taxNo: ent1.taxNo,
+      remark: '企业已接受临期调拨折扣：24 份餐食逐份贴标，门店按锁定批次备货，月结附件已归档',
+      status: OrderStatus.CONFIRMED, totalAmount: 220.4, createdBy: cgUser.id,
+    }));
+    const offerBBuild = this.buildNearOffer({
+      offerNo: 'LN-SEED02', deliverAt: deliverB,
+      lines: [
+        { product: P('BENTO-02'), batch: bBentoNear, quantity: 16, nearQty: 16, unitPrice: 19, rate: 0.5 },
+        { product: P('DRINK-01'), batch: bDrinkNear, quantity: 8, nearQty: 8, unitPrice: 5.7, rate: 0.5 },
+        { product: P('DRINK-01'), batch: bDrinkNormal, quantity: 8, nearQty: 0, unitPrice: 5.7, rate: 1 },
+      ],
+    });
+    const planBItems = offerBBuild.items.map((r: any) => ({
+      productId: r.productId, name: r.name, category: r.category, quantity: r.quantity,
+      unitPrice: r.unitPrice, nearExpiryQty: r.nearExpiryQty, vegetarian: r.vegetarian,
+      normalQty: r.normalQty, discountRates: r.discountRates, batchAllocations: r.batches,
+      lineBaseAmount: r.lineBaseAmount, lineOfferAmount: r.lineOfferAmount, nearExpiryOfferNo: 'LN-SEED02',
+    }));
+    await this.planRepo.save(this.planRepo.create({
+      orderId: orderB.id, storeId: stores[0].id, items: planBItems, totalPrice: offerBBuild.offerAmount,
+      reasons: ['优选「鲜达·中心旗舰店」供餐', offerBBuild.acceptReason],
+      warnings: [offerBBuild.warning],
+      reservedBatches: offerBBuild.reservedBatches, nearExpiryOfferNo: 'LN-SEED02',
+      discountReason: offerBBuild.reason, tempControl: offerBBuild.tempControl,
+      afterSalesPolicy: offerBBuild.policy, unitLabels: offerBBuild.units,
+      version: 1, status: 'ACCEPTED',
+    }));
+    const offerB = await this.offerRepo.save(this.offerRepo.create({
+      offerNo: 'LN-SEED02', orderId: orderB.id, enterpriseId: ent1.id, storeId: stores[0].id,
+      sourceType: 'PENDING_ORDER', status: NearExpiryOfferStatus.ACCEPTED, proposedBy: 1,
+      discountRate: 0.5, totalQty: 32, nearExpiryQty: 24,
+      amountBefore: offerBBuild.amountBefore, offerAmount: offerBBuild.offerAmount, savingsAmount: offerBBuild.savingsAmount,
+      items: offerBBuild.items, batches: offerBBuild.batches, units: offerBBuild.units,
+      tempControl: offerBBuild.tempControl, afterSalesPolicy: offerBBuild.policy,
+      discountReason: offerBBuild.reason, groupMealWindow: offerBBuild.window,
+      acceptedBy: cgUser.id, acceptedByName: '王芳', acceptedAt: new Date(Date.now() - 20 * 60000),
+      acceptanceNote: '企业行政在线确认接受临期调拨折扣，已知悉折扣原因与售后规则（24 份逐份贴标）',
+    }));
+    orderB.nearExpiryOfferId = offerB.id;
+    await this.orderRepo.save(orderB);
+    const monthB = `${deliverB.getFullYear()}-${String(deliverB.getMonth() + 1).padStart(2, '0')}`;
+    await this.attachmentRepo.save(this.attachmentRepo.create({
+      attachmentNo: 'FJ-SEED02', enterpriseId: ent1.id, orderId: orderB.id, offerId: offerB.id,
+      settlementId: null, month: monthB, type: 'NEAR_EXPIRY_CONFIRM',
+      title: `临期鲜食调拨企业确认附件 · LN-SEED02 · 团餐单 ${orderB.orderNo}`,
+      snapshot: offerBBuild.snapshot(offerB, orderB.orderNo, '王芳'),
+    }));
+
+    // 场景③：晨光科技已归档团餐（10 份素食便当临期调拨已履约），用于验证售后“临期≠质量问题”拦截
+    const deliverC = this.daysFromNow(-1, 12);
+    const cBatch = await this.batchRepo.save(this.batchRepo.create({
+      batchNo: 'BN-C01', storeId: stores[0].id, productId: P('BENTO-03').id,
+      quantity: 0, initialQuantity: 10,
+      producedAt: new Date(deliverC.getTime() - 5 * 3600000),
+      expiresAt: new Date(deliverC.getTime() + 2 * 3600000),
+      tempZone: 'HOT', status: 'DEPLETED',
+    }));
+    const orderC = await this.orderRepo.save(this.orderRepo.create({
+      orderNo: 'TM2026091608', enterpriseId: ent1.id, contractId: ctx.contract1.id, storeId: stores[0].id,
+      occasion: 'MEETING', headcount: 10, mealBudget: 30, vegetarianCount: 10, allergies: [],
+      deliverAt: deliverC, address: ent1.address, contactName: '王芳', contactPhone: '13800001111',
+      backupContactName: '刘洋', backupContactPhone: '13800002222',
+      invoiceRequired: true, invoiceTitle: ent1.invoiceTitle, taxNo: ent1.taxNo,
+      status: OrderStatus.COMPLETED, totalAmount: 85.5, actualHeadcount: 10, actualAmount: 85.5,
+      createdBy: cgUser.id,
+    }));
+    const offerCBuild = this.buildNearOffer({
+      offerNo: 'LN-SEED03', deliverAt: deliverC,
+      lines: [
+        { product: P('BENTO-03'), batch: cBatch, quantity: 10, nearQty: 10, unitPrice: 17.1, rate: 0.5 },
+      ],
+    });
+    const planCItems = offerCBuild.items.map((r: any) => ({
+      productId: r.productId, name: r.name, category: r.category, quantity: r.quantity,
+      unitPrice: r.unitPrice, nearExpiryQty: r.nearExpiryQty, vegetarian: r.vegetarian,
+      normalQty: r.normalQty, discountRates: r.discountRates, batchAllocations: r.batches,
+      lineBaseAmount: r.lineBaseAmount, lineOfferAmount: r.lineOfferAmount, nearExpiryOfferNo: 'LN-SEED03',
+    }));
+    await this.planRepo.save(this.planRepo.create({
+      orderId: orderC.id, storeId: stores[0].id, items: planCItems, totalPrice: 85.5,
+      reasons: ['优选「鲜达·中心旗舰店」供餐', offerCBuild.acceptReason], warnings: [offerCBuild.warning],
+      reservedBatches: offerCBuild.reservedBatches, nearExpiryOfferNo: 'LN-SEED03',
+      discountReason: offerCBuild.reason, tempControl: offerCBuild.tempControl,
+      afterSalesPolicy: offerCBuild.policy, unitLabels: offerCBuild.units,
+      version: 1, status: 'ACCEPTED',
+    }));
+    const offerC = await this.offerRepo.save(this.offerRepo.create({
+      offerNo: 'LN-SEED03', orderId: orderC.id, enterpriseId: ent1.id, storeId: stores[0].id,
+      sourceType: 'PENDING_ORDER', status: NearExpiryOfferStatus.FULFILLED, proposedBy: 1,
+      discountRate: 0.5, totalQty: 10, nearExpiryQty: 10,
+      amountBefore: 171, offerAmount: 85.5, savingsAmount: 85.5,
+      items: offerCBuild.items, batches: offerCBuild.batches, units: offerCBuild.units,
+      tempControl: offerCBuild.tempControl, afterSalesPolicy: offerCBuild.policy,
+      discountReason: offerCBuild.reason, groupMealWindow: offerCBuild.window,
+      acceptedBy: cgUser.id, acceptedByName: '王芳', acceptedAt: new Date(deliverC.getTime() - 3 * 3600000),
+      acceptanceNote: '企业行政在线确认接受临期调拨折扣，已知悉折扣原因与售后规则（10 份逐份贴标）',
+      fulfilledAt: new Date(deliverC.getTime() - 40 * 60000),
+    }));
+    orderC.nearExpiryOfferId = offerC.id;
+    await this.orderRepo.save(orderC);
+    await this.deliveryRepo.save(this.deliveryRepo.create({
+      orderId: orderC.id, courierId: 6, thermalBoxNo: 'BX-NE03',
+      route: '中心旗舰店 → 建国路 SOHO', outboundAt: new Date(deliverC.getTime() - 50 * 60000),
+      pickedAt: new Date(deliverC.getTime() - 40 * 60000),
+      deliveredAt: new Date(deliverC.getTime() - 5 * 60000),
+      signedAt: new Date(deliverC.getTime() + 10 * 60000), signerName: '王芳',
+      status: 'SIGNED', nearExpiryQty: 10,
+      nearExpiryTempControl: { offerNo: 'LN-SEED03', unitLabelCount: 10 },
+    }));
+    await this.archiveRepo.save(this.archiveRepo.create({
+      orderId: orderC.id, enterpriseId: ent1.id, storeId: stores[0].id,
+      actualAmount: 85.5, actualHeadcount: 10, returnCount: 0, returnAmount: 0,
+      nearExpiryUsed: 10, nearExpirySavings: 85.5, compensation: 0, onTime: true,
+      incidentCount: 0, invoiceErrors: 0, rating: 5, items: planCItems,
+      deliveredAt: deliverC,
+    }));
+    const monthC = `${deliverC.getFullYear()}-${String(deliverC.getMonth() + 1).padStart(2, '0')}`;
+    await this.attachmentRepo.save(this.attachmentRepo.create({
+      attachmentNo: 'FJ-SEED03', enterpriseId: ent1.id, orderId: orderC.id, offerId: offerC.id,
+      settlementId: null, month: monthC, type: 'NEAR_EXPIRY_CONFIRM',
+      title: `临期鲜食调拨企业确认附件 · LN-SEED03 · 团餐单 ${orderC.orderNo}`,
+      snapshot: offerCBuild.snapshot(offerC, orderC.orderNo, '王芳'),
+    }));
+  }
+
+  /** 构造临期折扣方案快照（与 NearExpiryService 同一口径，仅用于种子演示） */
+  private buildNearOffer(d: {
+    offerNo: string; deliverAt: Date;
+    lines: { product: any; batch: any; quantity: number; nearQty: number; unitPrice: number; rate: number }[];
+  }) {
+    const TZ: any = { HOT: '热链', CHILLED: '冷藏', FROZEN: '冷冻', AMBIENT: '常温' };
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    const items: any[] = [];
+    const batches: any[] = [];
+    const units: any[] = [];
+    let amountBefore = 0;
+    let offerAmount = 0;
+    let nearExpiryQty = 0;
+    let seq = 1;
+    const productLines = new Map<number, any>();
+    for (const l of d.lines) {
+      const cur = productLines.get(l.product.id) || {
+        productId: l.product.id, name: l.product.name, category: l.product.category,
+        vegetarian: !!l.product.vegetarian, quantity: 0, nearQty: 0, base: 0, offer: 0,
+        batches: [] as any[], rates: new Set<number>(),
+      };
+      cur.quantity += l.quantity;
+      cur.nearQty += l.nearQty;
+      cur.base = r2(cur.base + l.quantity * l.unitPrice);
+      cur.offer = r2(cur.offer + l.quantity * l.unitPrice * l.rate);
+      if (l.nearQty > 0) cur.rates.add(l.rate);
+      if (l.batch) {
+        const alloc = {
+          batchId: l.batch.id, batchNo: l.batch.batchNo, quantity: l.quantity, near: l.nearQty > 0,
+          discountRate: l.rate, tierLabel: l.rate < 1 ? `${l.rate * 10} 折` : null,
+          producedAt: l.batch.producedAt, expiresAt: l.batch.expiresAt, tempZone: l.batch.tempZone,
+        };
+        cur.batches.push(alloc);
+        batches.push({
+          batchId: l.batch.id, batchNo: l.batch.batchNo, productId: l.product.id, productName: l.product.name,
+          quantity: l.quantity, nearExpiryQty: l.nearQty, tempZone: l.batch.tempZone,
+          producedAt: l.batch.producedAt, expiresAt: l.batch.expiresAt,
+        });
+      }
+      for (let k = 0; k < l.nearQty; k++) {
+        units.push({
+          labelCode: `${d.offerNo}-U${String(seq++).padStart(3, '0')}`,
+          productId: l.product.id, productName: l.product.name, category: l.product.category,
+          batchId: l.batch.id, batchNo: l.batch.batchNo, tempZone: l.batch.tempZone,
+          producedAt: l.batch.producedAt, expiresAt: l.batch.expiresAt,
+          discountRate: l.rate, paidUnitPrice: r2(l.unitPrice * l.rate),
+          reason: '临期鲜食优先调拨：批次即将到期但仍符合团餐时间要求，企业确认折扣',
+          afterSalesRule: `临期调拨份（${TZ[l.batch.tempZone]}）：签收温控合格/包装完好/保质期内不认定为质量问题；请于送达后 2 小时内食用；签收当场温控异常可整批退换`,
+          remainingMinAtDelivery: Math.round((new Date(l.batch.expiresAt).getTime() - d.deliverAt.getTime()) / 60000),
+          status: 'LABELLED',
+        });
+      }
+      nearExpiryQty += l.nearQty;
+      productLines.set(l.product.id, cur);
+    }
+    for (const cur of productLines.values()) {
+      amountBefore = r2(amountBefore + cur.base);
+      offerAmount = r2(offerAmount + cur.offer);
+      items.push({
+        productId: cur.productId, name: cur.name, category: cur.category, vegetarian: cur.vegetarian,
+        quantity: cur.quantity, unitPrice: r2(cur.base / cur.quantity),
+        normalQty: cur.quantity - cur.nearQty, nearExpiryQty: cur.nearQty,
+        discountRates: Array.from(cur.rates).sort(), batches: cur.batches,
+        lineBaseAmount: cur.base, lineOfferAmount: cur.offer,
+      });
+    }
+    const zones = Array.from(new Set(batches.map((b: any) => b.tempZone)));
+    const tempControl = {
+      zones: zones.map(z => ({
+        zone: z, zoneName: TZ[z],
+        outbound: z === 'HOT' ? '出库中心温度 ≥65℃' : '出库表面温度 0~4℃',
+        transit: z === 'HOT' ? '热链保温箱全程 ≥60℃' : '冷藏保温箱 0~8℃，加配冰排',
+        handover: z === 'HOT' ? '签收中心温度 ≥60℃' : '签收表面温度 ≤8℃',
+        rejectRule: z === 'HOT'
+          ? '中心温度 <60℃ 判定温控失效，企业可整批退换，按质量售后处理（与临期属性无关）'
+          : '表面温度 >8℃ 判定温控失效，企业可整批退换',
+      })),
+      rules: ['临期批次优先装配、优先装箱、优先送达', '出库逐批次测温记录，随车携带批次温控记录单',
+        '企业签收当场抽测中心/表面温度并记入团餐单', '每份临期餐食贴调拨标签（批次/到期/折扣/食用时限）'],
+    };
+    const policy = {
+      version: '2026-v1',
+      nearExpiry: {
+        title: '临期调拨餐食售后规则（企业已逐份确认）', acknowledged: true,
+        serveDeadline: '请于送达后 2 小时内、且不晚于标签到期时间食用',
+        nonQuality: ['临期属性本身（剩余保质期较短）', '折扣价格对应的口感预期差异', '超过建议食用时限后食用引发的问题'],
+        qualityCovered: ['签收当场温控不合格可整批退换', '包装破损/胀气/渗液/污染/批次不符',
+          '建议食用时限内、温控合格仍变质异味：按标准食安流程处理'],
+        exchangeRule: '签收当场温控/包装异常可整批拒收退换；签收后 2 小时内疑似变质须提交温控照片与批次号',
+      },
+      normal: { title: '正常餐食售后规则', rule: '适用平台标准食安售后：批量退款/补送/同批次下架' },
+      statement: `本售后责任划分随方案 ${d.offerNo} 经企业行政在线确认，确认记录进入月结附件与售后说明；共 ${nearExpiryQty} 份临期餐食逐份贴标，后续售后不得将已确认临期份认定为质量问题。`,
+      tempZones: zones,
+    };
+    const reason = `门店当日鲜食批次即将临期，送达时仍在保质期内且覆盖团餐集中用餐时间窗（送达后至少可食用 15 分钟），符合团餐时间要求。平台按送达后剩余货架时间分档（5/6/7 折）推荐，临期份逐份贴标，请于送达后 2 小时内食用。`;
+    return {
+      items, batches, units, amountBefore, offerAmount, savingsAmount: r2(amountBefore - offerAmount),
+      nearExpiryQty, tempControl, policy, reason,
+      reservedBatches: batches.map((b: any) => ({
+        batchId: b.batchId, productId: b.productId, quantity: b.quantity, nearExpiryQty: b.nearExpiryQty,
+        discountRate: b.nearExpiryQty ? 0.5 : 1,
+      })),
+      window: {
+        deliverAt: d.deliverAt, minServeAt: new Date(d.deliverAt.getTime() + 15 * 60000),
+        nearCeil: new Date(d.deliverAt.getTime() + 6 * 3600000), serveWindowHours: 6,
+        batches: batches.filter((b: any) => b.nearExpiryQty > 0).map((b: any) => ({
+          batchNo: b.batchNo, productName: b.productName, tempZone: b.tempZone, expiresAt: b.expiresAt,
+          remainingMinAtDelivery: Math.round((new Date(b.expiresAt).getTime() - d.deliverAt.getTime()) / 60000),
+          withinGroupMealWindow: true,
+        })),
+      },
+      acceptReason: `企业已接受临期鲜食优先调拨折扣方案 ${d.offerNo}：${nearExpiryQty} 份临期餐食按 5~7 折结算，应付 ¥${r2(amountBefore - (amountBefore - offerAmount))}（节省 ¥${r2(amountBefore - offerAmount)}），批次/温控/售后责任已写入团餐单并逐份贴标`,
+      warning: `含 ${nearExpiryQty} 份临期调拨餐食：门店按锁定批次优先装配、全程温控，企业签收当场测温并请于送达后 2 小时内食用`,
+      snapshot: (offer: any, orderNo: string, acceptedByName: string) => ({
+        attachmentType: '临期鲜食优先调拨 · 企业确认',
+        offerNo: offer.offerNo, orderNo, acceptedBy: acceptedByName, acceptedAt: offer.acceptedAt,
+        acceptanceNote: offer.acceptanceNote, discountReason: reason,
+        totalQty: items.reduce((s, i) => s + i.quantity, 0), nearExpiryQty,
+        amountBefore, offerAmount, savingsAmount: r2(amountBefore - offerAmount),
+        tempControl, afterSalesPolicy: policy, units, batches,
+      }),
+    };
   }
 }

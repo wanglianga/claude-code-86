@@ -70,6 +70,26 @@
           <el-descriptions-item label="问题描述" :span="2">{{ detail.description || '—' }}</el-descriptions-item>
         </el-descriptions>
 
+        <!-- 临期调拨识别：企业已确认的临期份不认定为质量问题 -->
+        <div class="subblock" v-if="detail.nearExpiryMatch?.matched?.length">
+          <el-alert :type="detail.nearExpiryMatch.tempFailure ? 'error' : 'warning'" :closable="false" show-icon
+            :title="`临期调拨识别：${detail.nearExpiryMatch.matched.reduce((s:number,m:any)=>s+m.qty,0)} 份命中企业已确认方案 ${detail.nearExpiryMatch.offerNo}`"
+            :description="detail.nearExpiryMatch.note" style="margin-bottom:8px" />
+          <el-table :data="detail.nearExpiryMatch.matched" size="small" border>
+            <el-table-column prop="name" label="商品" min-width="130" />
+            <el-table-column prop="batchNo" label="批次" width="110" class-name="mono" />
+            <el-table-column prop="qty" label="数量" width="60" align="center" />
+            <el-table-column label="份标签码" min-width="200">
+              <template #default="{ row }">
+                <el-tag v-for="c in row.labelCodes" :key="c" size="small" type="warning" effect="dark" style="margin:2px">{{ c }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="售后规则" min-width="240" show-overflow-tooltip>
+              <template #default="{ row }"><span class="muted">{{ row.afterSalesRule }}</span></template>
+            </el-table-column>
+          </el-table>
+        </div>
+
         <div class="subblock">
           <div class="sub-title">温控照片凭证（{{ detail.photos?.length || 0 }}）</div>
           <div v-if="detail.photos?.length" style="display:flex; gap:10px; flex-wrap:wrap">

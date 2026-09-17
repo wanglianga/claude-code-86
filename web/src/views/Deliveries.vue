@@ -17,7 +17,7 @@
         <el-table-column label="约定送达" width="150">
           <template #default="{ row }">{{ fmtTime(row.order?.deliverAt) }}</template>
         </el-table-column>
-        <el-table-column label="加餐/餐标" width="150">
+        <el-table-column label="加餐/餐标" width="180">
           <template #default="{ row }">
             <el-tag v-if="row.topUpQty" size="small" type="danger" effect="dark">追加 +{{ row.topUpQty }} 份</el-tag>
             <el-tag v-if="row.extraDispatch" size="small" type="warning" effect="plain" style="margin-left:4px">加派骑手</el-tag>
@@ -31,7 +31,20 @@
                 特殊餐标 {{ row.specialLabels.length }}
               </el-tag>
             </el-tooltip>
-            <span v-if="!row.topUpQty && !row.specialLabels?.length" class="muted">-</span>
+            <el-tooltip v-if="row.nearExpiryQty" placement="left" :show-after="200">
+              <template #content>
+                <div style="max-width:280px">
+                  <div>临期调拨 {{ row.nearExpiryQty }} 份已逐份贴标，请优先配送、按温控交接</div>
+                  <div v-for="z in row.nearExpiryTempControl?.zones || []" :key="z.zone" style="margin-top:4px">
+                    {{ z.zoneName }}：{{ z.handover }}
+                  </div>
+                </div>
+              </template>
+              <el-tag size="small" type="danger" effect="dark" style="margin-left:4px">
+                临期 {{ row.nearExpiryQty }} 份
+              </el-tag>
+            </el-tooltip>
+            <span v-if="!row.topUpQty && !row.specialLabels?.length && !row.nearExpiryQty" class="muted">-</span>
           </template>
         </el-table-column>
         <el-table-column label="保温箱" width="100">

@@ -73,6 +73,10 @@ export class Settlement {
   @Column({ default: 'OPEN' })
   status: string;
 
+  /** 月结附件数（临期调拨企业确认等） */
+  @Column({ default: 0 })
+  attachmentCount: number;
+
   @CreateDateColumn()
   createdAt: Date;
 }

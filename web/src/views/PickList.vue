@@ -28,6 +28,9 @@
         <el-tag v-if="t.pendingLabels" size="small" type="warning" effect="dark" style="margin-left:auto">
           待贴标 {{ t.pendingLabels }} 枚
         </el-tag>
+        <el-tag v-if="t.nearExpiryQty" size="small" type="danger" effect="dark" style="margin-left:auto">
+          临期调拨 {{ t.nearExpiryQty }} 份
+        </el-tag>
       </div>
 
       <el-table :data="t.rows" size="small" border style="margin:8px 0">
@@ -58,6 +61,36 @@
         </el-table-column>
       </el-table>
 
+      <!-- 临期调拨：锁定批次 + 每份标记 + 温控 -->
+      <div v-if="t.nearExpiryQty" class="near-group">
+        <div class="near-head">
+          <span class="mono">{{ t.nearExpiryOfferNo }}</span>
+          <el-tag size="small" type="danger" effect="dark">临期调拨 {{ t.nearExpiryQty }} 份 · 每份贴标</el-tag>
+          <span class="muted">按锁定批次拣货，优先装配/装箱，出库测温留痕，企业签收当场测温</span>
+        </div>
+        <el-table :data="t.nearUnitGroups" size="small" border style="margin-top:6px">
+          <el-table-column prop="productName" label="商品" min-width="150" />
+          <el-table-column prop="batchNo" label="锁定批次" width="120" class-name="mono" />
+          <el-table-column label="温区" width="70" align="center">
+            <template #default="{ row }">{{ TEMP_ZONES[row.tempZone] }}</template>
+          </el-table-column>
+          <el-table-column label="到期" width="145">
+            <template #default="{ row }">{{ fmtTime(row.expiresAt) }}</template>
+          </el-table-column>
+          <el-table-column label="贴标份数" width="80" align="center">
+            <template #default="{ row }"><el-tag size="small" type="warning" effect="dark">{{ row.labelCodes.length }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="折后单价" width="90" align="right">
+            <template #default="{ row }">{{ fmtMoney(row.paidUnitPrice) }}</template>
+          </el-table-column>
+          <el-table-column label="份标签码（随餐贴标）" min-width="260">
+            <template #default="{ row }">
+              <el-tag v-for="c in row.labelCodes" :key="c" size="small" type="warning" effect="plain" style="margin:2px" class="mono">{{ c }}</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
       <div v-for="g in t.labelGroups" :key="g.topUpId" class="label-group">
         <div class="label-group-head">
           <span class="mono">{{ g.topUpNo }}</span>
@@ -87,7 +120,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import http from '../api/http'
-import { CATEGORIES, fmtTime } from '../utils/dict'
+import { CATEGORIES, TEMP_ZONES, fmtTime, fmtMoney } from '../utils/dict'
 
 const data = ref<any>(null)
 
@@ -105,4 +138,6 @@ onMounted(load)
 .label-group { background: #fff8f0; border: 1px dashed #f0a020; border-radius: 6px; padding: 8px; margin-top: 8px; }
 .label-group-head { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 4px; }
 .label-chips { line-height: 2; }
+.near-group { background: #fef6f6; border: 1px dashed #f56c6c; border-radius: 6px; padding: 8px; margin-top: 8px; }
+.near-head { display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap; }
 </style>

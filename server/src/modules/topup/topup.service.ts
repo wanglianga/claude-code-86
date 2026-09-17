@@ -437,6 +437,20 @@ export class TopUpService {
       const pendingLabels = labelGroups.reduce(
         (s, g) => s + (g.status === 'CONFIRMED' ? g.labels.length : 0), 0);
 
+      // 临期调拨：每份餐食标记（企业已接受折扣方案，门店按编码贴标+温控出库）
+      const nearUnits: any[] = (plan?.unitLabels || []);
+      const nearUnitGroups: any[] = [];
+      for (const u of nearUnits) {
+        let g = nearUnitGroups.find((x: any) => x.productId === u.productId && x.batchNo === u.batchNo);
+        if (!g) {
+          g = { productId: u.productId, productName: u.productName, batchNo: u.batchNo,
+            tempZone: u.tempZone, expiresAt: u.expiresAt, discountRate: u.discountRate,
+            paidUnitPrice: u.paidUnitPrice, labelCodes: [] };
+          nearUnitGroups.push(g);
+        }
+        g.labelCodes.push(u.labelCode);
+      }
+
       tickets.push({
         orderId: o.id,
         orderNo: o.orderNo,
@@ -448,6 +462,10 @@ export class TopUpService {
         topUpQty: extras.reduce((s, t) => s + t.addHeadcount, 0),
         labelGroups,
         pendingLabels,
+        nearExpiryOfferNo: plan?.nearExpiryOfferNo || null,
+        nearExpiryQty: nearUnits.length,
+        nearExpiryReason: plan?.discountReason || null,
+        nearUnitGroups,
       });
     }
     return {

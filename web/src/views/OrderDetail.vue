@@ -55,15 +55,34 @@
             <el-table-column label="单价" width="90" align="right">
               <template #default="{ row }">{{ fmtMoney(row.unitPrice) }}</template>
             </el-table-column>
-            <el-table-column label="属性" width="130">
+            <el-table-column label="属性" width="170">
               <template #default="{ row }">
                 <el-tag v-if="row.vegetarian" size="small" type="success" effect="plain">素</el-tag>
                 <el-tag v-if="row.nearExpiryQty" size="small" type="warning" style="margin-left:4px">
                   临期{{ row.nearExpiryQty }}份
                 </el-tag>
+                <el-tag v-if="nearOfferAccepted && row.nearExpiryQty" size="small" type="danger" effect="dark" style="margin-left:4px">
+                  每份贴标
+                </el-tag>
               </template>
             </el-table-column>
           </el-table>
+          <div v-if="nearOfferAccepted" class="unit-strip">
+            <div class="sub-title">
+              临期调拨逐份标记（{{ nearOffer?.units?.length || 0 }} 枚 · 含批次/温区/到期/折扣/售后规则）
+            </div>
+            <el-scrollbar max-height="110px">
+              <el-tag v-for="u in nearOffer?.units || []" :key="u.labelCode" size="small" effect="dark"
+                type="warning" class="unit-tag">
+                <span class="mono">{{ u.labelCode }}</span> · {{ u.productName }} · 批次{{ u.batchNo }} ·
+                {{ TEMP_ZONE[u.tempZone] }} · {{ Math.floor(u.remainingMinAtDelivery/60) }}h后到期 ·
+                {{ fmtMoney(u.paidUnitPrice) }}
+              </el-tag>
+            </el-scrollbar>
+            <div class="muted" style="font-size:12px; margin-top:4px">
+              折扣原因与售后规则：{{ nearOffer?.discountReason }}
+            </div>
+          </div>
           <div class="reason-block">
             <div class="sub-title">方案依据</div>
             <div v-for="(r, i) in currentPlan.reasons" :key="i" class="reason-item ok-text">✓ {{ r }}</div>
@@ -72,6 +91,38 @@
             <div class="sub-title">门店平衡提醒</div>
             <div v-for="(w, i) in currentPlan.warnings" :key="i" class="reason-item warn-text">⚠ {{ w }}</div>
           </div>
+        </div>
+
+        <div class="panel" v-if="nearOffer">
+          <div class="panel-title">
+            临期鲜食优先调拨折扣方案
+            <el-tag size="small" :type="NEAR_EXPIRY_OFFER_STATUS[nearOffer.status]?.type as any" style="margin-left:6px">
+              {{ NEAR_EXPIRY_OFFER_STATUS[nearOffer.status]?.name }}
+            </el-tag>
+            <el-tag size="small" type="warning" effect="dark" style="margin-left:6px">{{ nearOffer.nearExpiryQty }} 份临期</el-tag>
+            <span style="margin-left:auto" class="brand-text">{{ fmtMoney(nearOffer.offerAmount) }}</span>
+          </div>
+          <el-alert type="warning" :closable="false" show-icon :title="nearOffer.discountReason" style="margin:8px 0" />
+          <div class="offer-mini">
+            <span>方案号 <b class="mono">{{ nearOffer.offerNo }}</b></span>
+            <span>折前 {{ fmtMoney(nearOffer.amountBefore) }} → 折后 <b class="brand-text">{{ fmtMoney(nearOffer.offerAmount) }}</b></span>
+            <el-tag type="success" effect="dark">企业节省 {{ fmtMoney(nearOffer.savingsAmount) }}</el-tag>
+            <span>逐份标记 {{ nearOffer.units?.length || 0 }} 枚</span>
+            <el-button size="small" @click="openNearOffer(nearOffer.id)">查看批次/温控/售后规则</el-button>
+            <el-button v-if="nearOffer.status === 'PROPOSED' && auth.role === 'ENTERPRISE'"
+              size="small" type="primary" @click="openNearOffer(nearOffer.id)">去确认</el-button>
+          </div>
+          <div v-if="nearOffer.status === 'ACCEPTED' || nearOffer.status === 'FULFILLED'" class="offer-mini" style="margin-top:6px">
+            <el-tag size="small" type="success" effect="plain">企业确认：{{ nearOffer.acceptedByName }} · {{ fmtTime(nearOffer.acceptedAt) }}</el-tag>
+            <el-tag size="small" type="info" effect="plain">月结附件已归档</el-tag>
+            <el-tag v-if="nearOffer.status === 'FULFILLED'" size="small" type="success">已随单备货履约</el-tag>
+          </div>
+        </div>
+
+        <div class="panel" v-if="currentPlan?.afterSalesPolicy?.statement && !nearOffer">
+          <el-alert type="success" :closable="false" show-icon
+            :title="`本单含临期调拨餐食 ${currentPlan.unitLabels?.length || 0} 份（企业已逐份确认）`"
+            :description="currentPlan.afterSalesPolicy.statement" />
         </div>
 
         <div class="panel" v-if="o.topUps?.length">
@@ -504,8 +555,115 @@
       </template>
     </el-dialog>
 
+    <!-- 临期调拨折扣方案详情/确认 -->
+    <el-dialog v-model="nearOfferVisible" title="临期鲜食优先调拨 · 折扣方案" width="860px" top="5vh" append-to-body>
+      <div v-if="nearOfferDetail">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <b class="mono">{{ nearOfferDetail.offerNo }}</b>
+          <el-tag :type="NEAR_EXPIRY_OFFER_STATUS[nearOfferDetail.status]?.type as any">
+            {{ NEAR_EXPIRY_OFFER_STATUS[nearOfferDetail.status]?.name }}
+          </el-tag>
+          <span class="muted">推荐 {{ fmtTime(nearOfferDetail.createdAt) }}</span>
+        </div>
+        <el-alert type="warning" :closable="false" show-icon style="margin:10px 0"
+          :title="nearOfferDetail.discountReason" />
+
+        <div class="sub-title">团餐时间窗校验</div>
+        <el-table :data="nearOfferDetail.groupMealWindow?.batches || []" size="small" border>
+          <el-table-column prop="batchNo" label="批次" width="110" class-name="mono" />
+          <el-table-column prop="productName" label="商品" min-width="130" />
+          <el-table-column label="温区" width="70">
+            <template #default="{ row }">{{ TEMP_ZONE[row.tempZone] }}</template>
+          </el-table-column>
+          <el-table-column label="批次到期" width="145">
+            <template #default="{ row }">{{ fmtTime(row.expiresAt) }}</template>
+          </el-table-column>
+          <el-table-column label="送达后剩余" width="120" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" type="warning">{{ Math.floor(row.remainingMinAtDelivery/60) }}h{{ row.remainingMinAtDelivery%60 }}分</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div class="sub-title" style="margin-top:10px">商品批次与折扣</div>
+        <el-table :data="nearOfferDetail.items" size="small" border>
+          <el-table-column prop="name" label="商品" min-width="130" />
+          <el-table-column prop="quantity" label="份数" width="60" align="center" />
+          <el-table-column label="临期" width="60" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.nearExpiryQty" size="small" type="warning" effect="dark">{{ row.nearExpiryQty }}</el-tag>
+              <span v-else class="muted">0</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="出库批次/折扣" min-width="200">
+            <template #default="{ row }">
+              <el-tag v-for="b in row.batches" :key="b.batchId" size="small" style="margin:2px"
+                :type="b.near ? 'warning' : 'info'" :effect="b.near ? 'dark' : 'plain'">
+                <span class="mono">{{ b.batchNo }}</span>×{{ b.quantity }} {{ b.near ? `${b.discountRate*10}折` : '原价' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="折后行额" width="95" align="right">
+            <template #default="{ row }"><b class="brand-text">{{ fmtMoney(row.lineOfferAmount) }}</b></template>
+          </el-table-column>
+        </el-table>
+        <div class="amount-bar">
+          <span>折前 <b>{{ fmtMoney(nearOfferDetail.amountBefore) }}</b></span>
+          <span>→</span>
+          <span class="brand-text" style="font-size:17px">折后 {{ fmtMoney(nearOfferDetail.offerAmount) }}</span>
+          <el-tag type="success" effect="dark">节省 {{ fmtMoney(nearOfferDetail.savingsAmount) }}</el-tag>
+        </div>
+
+        <div class="sub-title" style="margin-top:10px">温控责任</div>
+        <el-table :data="nearOfferDetail.tempControl?.zones || []" size="small" border>
+          <el-table-column prop="zoneName" label="温区" width="70" />
+          <el-table-column prop="outbound" label="出库" min-width="140" />
+          <el-table-column prop="transit" label="在途" min-width="140" />
+          <el-table-column prop="handover" label="签收测温" min-width="130" />
+        </el-table>
+
+        <div class="sub-title" style="margin-top:10px">售后责任划分（企业确认后不可变）</div>
+        <div class="policy-box">
+          <div style="line-height:1.9;font-size:13px"><b>不认定为质量问题：</b>
+            <span v-for="(x,i) in nearOfferDetail.afterSalesPolicy?.nearExpiry?.nonQuality || []" :key="i">
+              【{{ x }}】
+            </span>
+          </div>
+          <div style="line-height:1.9;font-size:13px;margin-top:4px"><b>仍按质量售后：</b>
+            <span class="ok-text" v-for="(x,i) in nearOfferDetail.afterSalesPolicy?.nearExpiry?.qualityCovered || []" :key="i">
+              ✓{{ x }}；
+            </span>
+          </div>
+          <div class="muted" style="font-size:12.5px;line-height:1.8;margin-top:4px">
+            {{ nearOfferDetail.afterSalesPolicy?.statement }}
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <template v-if="nearOfferDetail?.status === 'PROPOSED' && auth.role === 'ENTERPRISE'">
+          <el-checkbox v-model="nearAck">我已知悉折扣原因、每份标记与售后规则（临期≠质量问题）</el-checkbox>
+          <div style="margin-top:8px;text-align:right">
+            <el-button @click="nearRejectVisible = true">拒绝</el-button>
+            <el-button type="primary" :disabled="!nearAck" @click="doAcceptNear">接受并写入团餐单</el-button>
+          </div>
+        </template>
+        <el-button v-else @click="nearOfferVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="nearRejectVisible" title="拒绝临期折扣方案" width="400px" append-to-body>
+      <el-input v-model="nearRejectReason" type="textarea" :rows="3" placeholder="拒绝原因（可选）" />
+      <template #footer>
+        <el-button @click="nearRejectVisible = false">取消</el-button>
+        <el-button type="warning" @click="doRejectNear">确认拒绝</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 餐食变质/异味售后 -->
     <el-dialog v-model="spoiledVisible" title="餐食变质 / 异味售后" width="680px">
+      <el-alert v-if="spoiledNearOffer" type="warning" :closable="false" show-icon style="margin-bottom:10px"
+        :title="`本单含企业已确认的临期调拨餐食（方案 ${spoiledNearOffer.offerNo}，共 ${spoiledNearOffer.totalUnits} 枚份标签）`"
+        description="临期属性（剩余保质期短/折扣价）不属于质量问题：仅勾选临期贴标批次提交将被系统拦截。如签收当场温控不合格（热链中心<60℃/冷藏表面>8℃）、包装破损或保质期内确有变质异味，请上传测温照片后提交，将按质量售后受理。" />
       <el-alert type="error" :closable="false" show-icon
         title="请选择问题商品与生产批次，并填写签收时间、上传温控照片、登记食用人员；提交后客服将受理，可批量退款、补送并触发同批次门店下架。"
         style="margin-bottom:12px" />
@@ -536,7 +694,7 @@
           <template #default="{ row }">
             <el-select v-model="row.batchId" size="small" filterable placeholder="选择批次" :disabled="!row.checked">
               <el-option v-for="b in spoiledBatches.filter((x:any)=>x.productId===row.productId)" :key="b.batchId"
-                :label="`${b.batchNo}（生产 ${fmtTime(b.producedAt)} / ${b.status==='DEPLETED'?'已售罄':b.quantity+'份在架'}）`" :value="b.batchId" />
+                :label="`${b.batchNo}（生产 ${fmtTime(b.producedAt)} / ${b.status==='DEPLETED'?'已售罄':b.quantity+'份在架'}${b.nearExpiryLabels?.length ? ` / 临期贴标${b.nearExpiryLabels.length}枚` : ''}）`" :value="b.batchId" />
             </el-select>
           </template>
         </el-table-column>
@@ -587,7 +745,7 @@ import { useAuthStore } from '../stores/auth'
 import {
   ORDER_STATUS, ORDER_FLOW, OCCASIONS, CATEGORIES, INCIDENT_TYPES,
   INCIDENT_STATUS, DELIVERY_STATUS, INVOICE_STATUS, TOPUP_STATUS,
-  SPOILED_STATUS, REFUND_STATUS,
+  SPOILED_STATUS, REFUND_STATUS, NEAR_EXPIRY_OFFER_STATUS, TEMP_ZONES,
   ALLERGENS, fmtTime, fmtMoney,
 } from '../utils/dict'
 
@@ -633,10 +791,44 @@ const spoiledSubmitting = ref(false)
 const spoiledBatches = ref<any[]>([])
 const spoiledForm = reactive<any>({ issueType: 'SPOILED', deliveredAt: null, items: [], photos: [], diners: [{ name: '', phone: '', symptom: '' }], description: '' })
 const spoiledReports = computed(() => o.value?.spoiledReports || [])
+const spoiledNearOffer = ref<any>(null)
+
+// ===== 临期鲜食优先调拨折扣方案 =====
+const nearOfferVisible = ref(false)
+const nearOfferDetail = ref<any>(null)
+const nearAck = ref(false)
+const nearRejectVisible = ref(false)
+const nearRejectReason = ref('')
+const nearOffer = computed(() => {
+  const list = o.value?.nearExpiryOffers || []
+  return list.find((x: any) => ['ACCEPTED', 'FULFILLED', 'PROPOSED'].includes(x.status)) || list[0] || null
+})
+const nearOfferAccepted = computed(() =>
+  ['ACCEPTED', 'FULFILLED'].includes(nearOffer.value?.status))
+
+async function openNearOffer(id: number) {
+  nearOfferDetail.value = await http.get(`/near-expiry/offers/${id}`)
+  nearAck.value = false
+  nearOfferVisible.value = true
+}
+async function doAcceptNear() {
+  await http.post(`/near-expiry/offers/${nearOfferDetail.value.id}/accept`, {})
+  ElMessage.success('已接受：批次/折扣/温控/售后责任写入团餐单，确认已入月结附件')
+  nearOfferVisible.value = false
+  load()
+}
+async function doRejectNear() {
+  await http.post(`/near-expiry/offers/${nearOfferDetail.value.id}/reject`, { reason: nearRejectReason.value })
+  ElMessage.success('已拒绝，按正常方案履约')
+  nearRejectVisible.value = false
+  nearOfferVisible.value = false
+  load()
+}
 
 async function openSpoiled() {
   const ctx: any = await http.get(`/spoiled/context/${id}`)
   spoiledBatches.value = ctx.batches
+  spoiledNearOffer.value = ctx.nearExpiryOffer
   spoiledForm.issueType = 'SPOILED'
   spoiledForm.deliveredAt = ctx.deliveredAt
   spoiledForm.items = ctx.items.map((i: any) => ({ ...i, checked: false, qty: 1, batchId: null }))
@@ -849,4 +1041,10 @@ onMounted(load)
 .spoiled-row { display:flex; align-items:center; gap:10px; padding:8px 6px; border-bottom:1px solid #f2f3f5; cursor:pointer; font-size:13px; }
 .spoiled-row:hover { background:#f7f8fa; }
 .photo-edit-row { display:flex; gap:8px; align-items:center; margin:6px 0; }
+.offer-mini { display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:13px; }
+.unit-strip { margin-top:10px; padding-top:8px; border-top:1px dashed #f0a020; }
+.unit-tag { margin:2px; }
+.brand-text { color:#ff6a00; }
+.amount-bar { display:flex; align-items:center; gap:12px; margin-top:10px; padding:8px 12px; background:#fff8f0; border-radius:8px; border:1px dashed #f0a020; font-size:13px; }
+.policy-box { background:#f6fbf8; border:1px solid #d4ecdd; border-radius:8px; padding:10px 12px; }
 </style>

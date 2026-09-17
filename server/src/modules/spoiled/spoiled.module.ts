@@ -11,6 +11,7 @@ import { Incident, IncidentLog } from '../../entities/incident.entity';
 import { Archive, Feedback } from '../../entities/archive.entity';
 import { Delivery } from '../../entities/delivery.entity';
 import { User } from '../../entities/user.entity';
+import { NearExpiryOffer } from '../../entities/near-expiry.entity';
 import { SpoiledService } from './spoiled.service';
 import { SpoiledController } from './spoiled.controller';
 
@@ -18,7 +19,7 @@ import { SpoiledController } from './spoiled.controller';
   imports: [TypeOrmModule.forFeature([
     SpoiledReport, BatchRecall, RecallTask, Redelivery,
     MealOrder, MealPlan, InventoryBatch, Product, Store,
-    Incident, IncidentLog, Archive, Feedback, Delivery, User,
+    Incident, IncidentLog, Archive, Feedback, Delivery, User, NearExpiryOffer,
   ])],
   providers: [SpoiledService],
   controllers: [SpoiledController],
