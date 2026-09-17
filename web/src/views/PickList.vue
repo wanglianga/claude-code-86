@@ -15,6 +15,62 @@
       title="临时追加餐食已自动同步到本清单（橙色追加行）；含素食/过敏的追加餐必须按企业名单逐份重新贴标，贴标后在订单详情中确认，避免漏贴某一类特殊餐标。"
       style="margin-bottom:12px" />
 
+    <!-- 临期鲜食优先调拨：逐份标记 -->
+    <div v-if="offerTickets.length" class="panel" style="margin-bottom:14px; border-color:#f0d9a8">
+      <div class="panel-title">
+        临期鲜食优先调拨 · 逐份餐食标记
+        <el-tag size="small" type="warning" effect="dark" style="margin-left:6px">
+          {{ offerTickets.length }} 单 / {{ offerTickets.reduce((s:number,t:any)=>s+t.totalQuantity,0) }} 份
+        </el-tag>
+      </div>
+      <el-alert type="warning" :closable="false" show-icon
+        title="以下餐食为企业已确认的临期调拨折扣餐，必须逐份贴「临期调拨」标签（含折扣原因、温控与售后规则），提醒企业送达后 2 小时内食用；临期不等于质量问题。"
+        style="margin-bottom:10px" />
+      <div v-for="f in offerTickets" :key="f.offerId" class="offer-pick-card">
+        <div class="pick-head">
+          <el-link type="primary" @click="$router.push(`/orders/${f.orderId}`)">{{ f.orderNo }}</el-link>
+          <span class="mono">{{ f.offerNo }}</span>
+          <el-tag size="small" type="info">{{ fmtTime(f.deliverAt) }} 送达</el-tag>
+          <el-tag size="small" type="warning" effect="dark">临期 {{ f.totalQuantity }} 份 · 省 {{ fmtMoney(f.savingAmount) }}</el-tag>
+          <el-tag v-if="f.labelConfirmed" size="small" type="success" style="margin-left:auto">已逐份贴标</el-tag>
+          <el-button v-else size="small" type="warning" style="margin-left:auto" @click="confirmOfferLabel(f)">
+            逐份贴标确认（{{ f.totalQuantity }} 枚）
+          </el-button>
+        </div>
+        <el-table :data="f.items" size="small" border style="margin:6px 0">
+          <el-table-column prop="productName" label="商品" min-width="150" />
+          <el-table-column prop="batchNo" label="批次号" width="110" class-name="mono" />
+          <el-table-column prop="sourceStoreName" label="来源门店" min-width="140" />
+          <el-table-column label="温控" width="70" align="center">
+            <template #default="{ row }">{{ TEMP_ZONE_NAME[row.tempZone] }}</template>
+          </el-table-column>
+          <el-table-column prop="quantity" label="份数" width="60" align="center" />
+          <el-table-column label="折扣" width="70" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" type="warning" effect="dark">{{ Math.round(row.discountRate * 10) }}折</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="muted" style="font-size:12px; margin-bottom:4px">
+          温控：{{ f.tempControl?.requirement }}；{{ f.tempControl?.deliverTemp }}；{{ f.tempControl?.note }}
+        </div>
+        <div class="label-chips">
+          <el-tooltip v-for="p in f.portions" :key="p.code" placement="top" :show-after="150">
+            <template #content>
+              <div style="max-width:300px; line-height:1.7">
+                <div>批次 {{ p.batchNo }} · 到期 {{ fmtTime(p.expiresAt) }} · 建议食用前 {{ fmtTime(p.eatBefore) }}</div>
+                <div>{{ p.discountReason }}</div>
+              </div>
+            </template>
+            <el-tag size="small" type="warning" effect="dark" style="margin:2px">{{ p.code }}</el-tag>
+          </el-tooltip>
+        </div>
+        <div v-if="f.labelConfirmed" class="ok-text" style="font-size:12px; margin-top:4px">
+          {{ f.labelNote }} · {{ fmtTime(f.labelledAt) }}
+        </div>
+      </div>
+    </div>
+
     <div v-for="t in data?.tickets || []" :key="t.orderId" class="panel pick-card"
       :class="{ 'has-topup': t.topUpCount > 0 }">
       <div class="pick-head">
@@ -85,15 +141,31 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import http from '../api/http'
-import { CATEGORIES, fmtTime } from '../utils/dict'
+import { CATEGORIES, TEMP_ZONE_NAME, fmtTime, fmtMoney } from '../utils/dict'
 
 const data = ref<any>(null)
+const offerList = ref<any[]>([])
+const offerTickets = computed(() =>
+  offerList.value.filter(f => ['CONFIRMED', 'FULFILLED'].includes(f.status)))
 
 async function load() {
-  data.value = await http.get('/topups/picklist')
+  const [pl, offers]: any[] = await Promise.all([
+    http.get('/topups/picklist'),
+    http.get('/near-expiry/pick-offers'),
+  ])
+  data.value = pl
+  offerList.value = offers
 }
+
+async function confirmOfferLabel(f: any) {
+  await http.post(`/near-expiry/offers/${f.offerId}/label`, { labelledQty: f.totalQuantity })
+  ElMessage.success('已逐份贴齐临期标记')
+  load()
+}
+
 onMounted(load)
 </script>
 
@@ -105,4 +177,5 @@ onMounted(load)
 .label-group { background: #fff8f0; border: 1px dashed #f0a020; border-radius: 6px; padding: 8px; margin-top: 8px; }
 .label-group-head { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 4px; }
 .label-chips { line-height: 2; }
+.offer-pick-card { border: 1px solid #f0d9a8; background: #fefbf4; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
 </style>

@@ -70,6 +70,31 @@
           <el-descriptions-item label="问题描述" :span="2">{{ detail.description || '—' }}</el-descriptions-item>
         </el-descriptions>
 
+        <!-- 临期折扣售后防误判提示 -->
+        <el-alert v-if="detail.nearExpiryNotice?.matched" type="warning" :closable="false" show-icon
+          style="margin-top:10px"
+          title="本单问题批次命中企业已确认的临期调拨折扣方案">
+          <template #default>
+            <div style="line-height:1.8">
+              <div v-for="h in detail.nearExpiryNotice.offers" :key="h.offerNo + h.batchNo">
+                方案 <b class="mono">{{ h.offerNo }}</b> · 批次 <b class="mono">{{ h.batchNo }}</b>
+                （{{ Math.round(h.discountRate * 10) }} 折，{{ h.confirmedBy }} 于 {{ fmtTime(h.confirmedAt) }} 确认，
+                逐份标记 {{ h.portionCodes?.length || 0 }} 枚）。
+              </div>
+              <div v-if="detail.nearExpiryNotice.acknowledged" style="margin-top:4px">
+                <el-tag size="small" type="warning" effect="dark">企业已勾选：知晓临期折扣，仍主张真实食安问题</el-tag>
+              </div>
+              <div style="margin-top:4px">{{ detail.nearExpiryNotice.notice }}</div>
+              <el-collapse style="margin-top:4px">
+                <el-collapse-item title="查看企业确认的售后规则">
+                  <div v-for="(r,i) in (detail.nearExpiryNotice.offers[0]?.afterSalesRules || [])" :key="i"
+                    style="font-size:12.5px; line-height:1.8">{{ r }}</div>
+                </el-collapse-item>
+              </el-collapse>
+            </div>
+          </template>
+        </el-alert>
+
         <div class="subblock">
           <div class="sub-title">温控照片凭证（{{ detail.photos?.length || 0 }}）</div>
           <div v-if="detail.photos?.length" style="display:flex; gap:10px; flex-wrap:wrap">

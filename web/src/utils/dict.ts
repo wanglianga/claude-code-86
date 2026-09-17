@@ -91,6 +91,21 @@ export const SPOILED_ISSUE: Record<string, string> = {
   TEMP: '温控失当',
 }
 
+export const OFFER_STATUS: Record<string, { name: string; type: string }> = {
+  PROPOSED: { name: '待企业确认', type: 'warning' },
+  CONFIRMED: { name: '企业已确认', type: 'success' },
+  REJECTED: { name: '企业已拒绝', type: 'info' },
+  FULFILLED: { name: '已随餐履约', type: 'success' },
+  CANCELLED: { name: '已取消', type: 'info' },
+}
+
+export const TEMP_ZONE_NAME: Record<string, string> = {
+  HOT: '热链',
+  CHILLED: '冷藏',
+  FROZEN: '冷冻',
+  AMBIENT: '常温',
+}
+
 export const SPOILED_STATUS: Record<string, { name: string; type: string }> = {
   OPEN: { name: '待受理', type: 'danger' },
   PROCESSING: { name: '处理中', type: 'warning' },

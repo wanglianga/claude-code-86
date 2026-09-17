@@ -73,6 +73,15 @@ export class Settlement {
   @Column({ default: 'OPEN' })
   status: string;
 
+  /**
+   * 月结附件：企业已确认的临期调拨折扣方案（企业确认凭据）
+   * [{ offerId, offerNo, orderId, orderNo, storeId, storeName, quantity,
+   *    originalAmount, finalAmount, savingAmount, discountReason,
+   *    afterSalesRules, confirmedBy, confirmedByName, confirmedAt }]
+   */
+  @Column({ type: 'jsonb', default: [] })
+  attachments: any[];
+
   @CreateDateColumn()
   createdAt: Date;
 }

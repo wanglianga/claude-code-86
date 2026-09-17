@@ -64,6 +64,16 @@ export class SpoiledReport {
   @Column({ default: 'SPOILED' })
   issueType: string;
 
+  /**
+   * 临期折扣关联（售后防误判）：
+   * 命中已企业确认的临期调拨方案时写入
+   * { matched: boolean, offers: [{ offerId, offerNo, portionCodes, batchNo,
+   *   confirmedBy, confirmedAt, afterSalesRules, discountReason }],
+   *   notice: string, acknowledged: boolean }
+   */
+  @Column({ type: 'jsonb', default: {} })
+  nearExpiryNotice: any;
+
   /** 变质商品明细 [{productId, name, batchId, batchNo, unitPrice, qty, issueType}] */
   @Column({ type: 'jsonb', default: [] })
   items: any[];

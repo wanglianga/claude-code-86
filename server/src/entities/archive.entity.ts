@@ -61,6 +61,14 @@ export class Archive {
   @Column({ default: 0 })
   nearExpiryUsed: number;
 
+  /** 本单经企业确认的临期调拨折扣方案数 */
+  @Column({ default: 0 })
+  nearExpiryOfferCount: number;
+
+  /** 临期调拨为企业节省的折扣金额（企业已确认） */
+  @Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
+  nearExpiryDiscountAmount: number;
+
   /** 本单赔付总额 */
   @Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
   compensation: number;

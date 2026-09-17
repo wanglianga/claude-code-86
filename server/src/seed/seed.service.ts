@@ -15,6 +15,7 @@ import { Invoice, Settlement } from '../entities/finance.entity';
 import { Archive, Feedback } from '../entities/archive.entity';
 import { MealTopUp } from '../entities/topup.entity';
 import { SpoiledReport, BatchRecall, RecallTask, Redelivery } from '../entities/spoiled.entity';
+import { NearExpiryOffer } from '../entities/near-expiry.entity';
 
 @Injectable()
 export class SeedService implements OnApplicationBootstrap {
@@ -44,6 +45,7 @@ export class SeedService implements OnApplicationBootstrap {
     @InjectRepository(BatchRecall) private recallRepo: Repository<BatchRecall>,
     @InjectRepository(RecallTask) private recallTaskRepo: Repository<RecallTask>,
     @InjectRepository(Redelivery) private redeliveryRepo: Repository<Redelivery>,
+    @InjectRepository(NearExpiryOffer) private offerRepo: Repository<NearExpiryOffer>,
   ) {}
 
   async onApplicationBootstrap() {
@@ -572,6 +574,182 @@ export class SeedService implements OnApplicationBootstrap {
     await this.incidentLogRepo.save(this.incidentLogRepo.create({
       incidentId: openIncident.id, actorId: users[8].id, actorName: '陈静', actorRole: '客服',
       action: 'COMMENT', note: '已受理：提出 2 倍批量退款 ¥88 待财务确认；补送单 BC-SEED01 已备货待骑手送达；同批次下架待触发',
+    }));
+
+    // ============ 临期鲜食优先调拨折扣演示 ============
+    const offerRules = (rate: number) => [
+      `【临期定性】本批餐食为临期鲜食优先调拨，已由企业行政确认按 ${rate} 折结算；餐食临近保质期但仍在保质期内、符合团餐送达后 2 小时食用要求，"临期/新鲜度不及正价餐"本身不属于质量问题，不得据此按餐食变质申请售后。`,
+      `【食用时限】请于送达后 2 小时内且不晚于包装批次到期时间食用完毕；逾期食用或企业签收后未按标示温控暂存导致的问题，由企业自行承担。`,
+      '【温控责任】门店按标示温区出库、仓配全程温控配送并记录温度；企业签收后脱离温控暂存导致的变质不纳入平台赔付。',
+      '【真实食安不免责】若餐食存在异味、变质、异物等真实食品安全问题，企业仍可凭批次号与温控照片提交变质售后，平台按食安流程受理（批量退款/补送/同批次下架），临期折扣不免除平台质量责任。',
+      '【确认凭据】企业对本方案的确认记录（含批次、折扣、温控、售后规则、逐份餐食标记）已写入团餐单、月结附件与售后说明，作为售后责任界定依据。',
+    ];
+
+    // 场景一：晨光科技 20 人会议餐（4 小时后送达，月结），中心旗舰店有一批照烧鸡腿便当
+    //         7 小时后到期，送达时仍有 3 小时食用窗口，门店已推荐 7 折临期方案，待企业行政确认。
+    const neDeliverAt = this.hoursFromNow(4);
+    const neBatchExpire = this.hoursFromNow(7);
+    const neBatch = await this.batchRepo.save(this.batchRepo.create({
+      batchNo: 'B-NEAR01', storeId: stores[0].id, productId: P('BENTO-02').id,
+      quantity: 20, initialQuantity: 20,
+      producedAt: this.hoursFromNow(-1), expiresAt: neBatchExpire,
+      tempZone: 'HOT', supplierId: suppliers[0].id, status: 'AVAILABLE',
+    }));
+    const offerOrder = await this.orderRepo.save(this.orderRepo.create({
+      orderNo: `TM${Date.now().toString().slice(-10)}06`,
+      enterpriseId: ent1.id, contractId: contract1.id, storeId: stores[0].id,
+      occasion: 'MEETING', headcount: 20, mealBudget: 30, vegetarianCount: 0,
+      allergies: [], deliverAt: neDeliverAt,
+      address: ent1.address, contactName: '王芳', contactPhone: '13800001111',
+      backupContactName: '刘洋', backupContactPhone: '13800002222',
+      invoiceRequired: true, invoiceTitle: ent1.invoiceTitle, taxNo: ent1.taxNo,
+      remark: '部门季度复盘会工作餐',
+      status: OrderStatus.CONFIRMED, totalAmount: 560, createdBy: cgUser.id,
+    }));
+    await this.planRepo.save(this.planRepo.create({
+      orderId: offerOrder.id, storeId: stores[0].id,
+      items: [
+        { productId: P('BENTO-02').id, name: '照烧鸡腿便当', category: 'BENTO', quantity: 20, unitPrice: 19, nearExpiryQty: 0, vegetarian: false },
+        { productId: P('DRINK-01').id, name: '鲜榨橙汁', category: 'DRINK', quantity: 20, unitPrice: 5.7, nearExpiryQty: 0, vegetarian: true },
+        { productId: P('FRUIT-01').id, name: '香蕉', category: 'FRUIT', quantity: 20, unitPrice: 3.3, nearExpiryQty: 0, vegetarian: true },
+      ],
+      totalPrice: 560,
+      reasons: ['优选「鲜达·中心旗舰店」供餐：距企业 0.3km，库存与产能充足', '适用长期合同折扣 9.5 折'],
+      warnings: [], version: 1, status: 'ACCEPTED',
+    }));
+    const offerReason = `该批次为「鲜达·中心旗舰店」当日鲜食，今日 ${String(neBatchExpire.getHours()).padStart(2, '0')}:${String(neBatchExpire.getMinutes()).padStart(2, '0')} 到期，按团餐时间（${String(neDeliverAt.getHours()).padStart(2, '0')}:${String(neDeliverAt.getMinutes()).padStart(2, '0')} 送达）核验仍保留 3 小时食用窗口（≥2 小时），符合团餐供餐要求；为避免临期报损、优先团餐消化，按 0.7 折调拨。餐食仍在保质期内，非质量问题折价。`;
+    await this.offerRepo.save(this.offerRepo.create({
+      offerNo: 'NE-SEED-PENDING', orderId: offerOrder.id, enterpriseId: ent1.id, storeId: stores[0].id,
+      recommendedBy: users[3].id, recommendedByRole: 'STORE', status: 'PROPOSED',
+      items: [{
+        productId: P('BENTO-02').id, name: '照烧鸡腿便当', category: 'BENTO', vegetarian: false,
+        quantity: 20, unitPrice: 19, discountRate: 0.7, discountPrice: 13.3,
+        lineOriginal: 380, lineFinal: 266, lineSaving: 114,
+        batchId: neBatch.id, batchNo: neBatch.batchNo,
+        sourceStoreId: stores[0].id, sourceStoreName: stores[0].name, crossStore: false,
+        producedAt: this.hoursFromNow(-1), expiresAt: neBatchExpire, tempZone: 'HOT', remainHours: 3,
+      }],
+      portions: [],
+      originalAmount: 380, finalAmount: 266, savingAmount: 114, totalQuantity: 20,
+      discountReason: offerReason,
+      tempControl: {
+        zones: ['HOT'], requirement: '热链鲜食全程保温配送，门店出餐中心温度 ≥60℃',
+        box: '热链保温箱（箱内 ≥60℃）', deliverTemp: '送达中心温度 ≥55℃', eatBeforeHours: 2,
+        note: '送达后请按标示温度暂存，并于 2 小时食用窗口内食用完毕',
+      },
+      afterSalesRules: offerRules(0.7),
+      mealTimeCheck: {
+        deliverAt: neDeliverAt, eatWindowHours: 2, nearLookupHours: 6, passed: true,
+        lines: [{
+          productName: '照烧鸡腿便当', batchNo: neBatch.batchNo, sourceStoreName: stores[0].name,
+          expiresAt: neBatchExpire, remainHours: 3, ok: true, reason: '送达时仍有 3 小时食用窗口（要求 ≥2 小时）',
+        }],
+      },
+      transferIds: [], stockDeducted: false,
+    }));
+
+    // 场景二：本月已归档团餐（晨光科技月结），临期折扣方案企业已确认并履约，
+    //         含逐份餐食标记、企业确认快照；财务当月归集月结时自动进入月结附件。
+    const doneDeliverAt = new Date();
+    doneDeliverAt.setHours(11, 30, 0, 0);
+    const doneExpire = new Date();
+    doneExpire.setHours(14, 0, 0, 0);
+    const fulfilledBatch = await this.batchRepo.save(this.batchRepo.create({
+      batchNo: 'B-NEAR02', storeId: stores[0].id, productId: P('BENTO-03').id,
+      quantity: 0, initialQuantity: 12,
+      producedAt: new Date(doneDeliverAt.getTime() - 5 * 3600000), expiresAt: doneExpire,
+      tempZone: 'HOT', supplierId: suppliers[0].id, status: 'DEPLETED',
+    }));
+    const doneItems = [
+      { productId: P('BENTO-03').id, name: '田园时蔬素食便当', category: 'BENTO', quantity: 12, unitPrice: 17.1, nearExpiryQty: 12, vegetarian: true },
+      { productId: P('DRINK-01').id, name: '鲜榨橙汁', category: 'DRINK', quantity: 12, unitPrice: 5.7, nearExpiryQty: 0, vegetarian: true },
+    ];
+    const doneTotal = 212.04;
+    const doneOrder = await this.orderRepo.save(this.orderRepo.create({
+      orderNo: 'TM202609NE07',
+      enterpriseId: ent1.id, contractId: contract1.id, storeId: stores[0].id,
+      occasion: 'MEETING', headcount: 12, mealBudget: 30, vegetarianCount: 12,
+      allergies: [], deliverAt: doneDeliverAt,
+      address: ent1.address, contactName: '王芳', contactPhone: '13800001111',
+      backupContactName: '刘洋', backupContactPhone: '13800002222',
+      invoiceRequired: true, invoiceTitle: ent1.invoiceTitle, taxNo: ent1.taxNo,
+      status: OrderStatus.COMPLETED, totalAmount: doneTotal,
+      actualHeadcount: 12, actualAmount: doneTotal, createdBy: cgUser.id,
+      createdAt: doneDeliverAt, updatedAt: new Date(),
+    }));
+    await this.planRepo.save(this.planRepo.create({
+      orderId: doneOrder.id, storeId: stores[0].id, items: doneItems, totalPrice: doneTotal,
+      reasons: ['优选「鲜达·中心旗舰店」供餐', '临期鲜食优先调拨 12 份经企业行政 王芳 确认（方案 NE-SEED-DONE，0.7 折，节省 ¥61.56）'],
+      warnings: [], version: 1, status: 'ACCEPTED',
+    }));
+    await this.deliveryRepo.save(this.deliveryRepo.create({
+      orderId: doneOrder.id, courierId: courier1.id, thermalBoxNo: 'BX-NEAR',
+      route: '中心旗舰店 → 建国路 SOHO',
+      outboundAt: new Date(doneDeliverAt.getTime() - 50 * 60000),
+      pickedAt: new Date(doneDeliverAt.getTime() - 40 * 60000),
+      deliveredAt: new Date(doneDeliverAt.getTime() - 5 * 60000),
+      signedAt: new Date(doneDeliverAt.getTime() + 10 * 60000), signerName: '王芳',
+      status: 'SIGNED', late: false,
+    }));
+    const confirmedAt = new Date(doneDeliverAt.getTime() - 3 * 3600000);
+    const donePortions = Array.from({ length: 12 }, (_, i) => ({
+      code: `NE-SEED-DONE-P${String(i + 1).padStart(3, '0')}`,
+      productId: P('BENTO-03').id, productName: '田园时蔬素食便当',
+      batchNo: fulfilledBatch.batchNo, inboundBatchNo: null,
+      sourceStoreName: stores[0].name, tempZone: 'HOT', tempZoneName: '热链',
+      producedAt: new Date(doneDeliverAt.getTime() - 5 * 3600000), expiresAt: doneExpire,
+      eatBefore: doneExpire, discountRate: 0.7, discountPrice: 11.97, unitPrice: 17.1,
+      discountReason: offerReason.replace('照烧鸡腿便当', '田园时蔬素食便当').replace(/今日 \d{2}:\d{2}/,
+        `今日 ${String(doneExpire.getHours()).padStart(2, '0')}:${String(doneExpire.getMinutes()).padStart(2, '0')}`),
+      afterSalesRules: offerRules(0.7),
+      label: '临期调拨 7 折',
+    }));
+    await this.offerRepo.save(this.offerRepo.create({
+      offerNo: 'NE-SEED-DONE', orderId: doneOrder.id, enterpriseId: ent1.id, storeId: stores[0].id,
+      recommendedBy: users[3].id, recommendedByRole: 'STORE', status: 'FULFILLED',
+      items: [{
+        productId: P('BENTO-03').id, name: '田园时蔬素食便当', category: 'BENTO', vegetarian: true,
+        quantity: 12, unitPrice: 17.1, discountRate: 0.7, discountPrice: 11.97,
+        lineOriginal: 205.2, lineFinal: 143.64, lineSaving: 61.56,
+        batchId: fulfilledBatch.id, batchNo: fulfilledBatch.batchNo,
+        sourceStoreId: stores[0].id, sourceStoreName: stores[0].name, crossStore: false,
+        producedAt: new Date(doneDeliverAt.getTime() - 5 * 3600000), expiresAt: doneExpire,
+        tempZone: 'HOT', remainHours: 2.5, fulfilledBatchId: fulfilledBatch.id,
+      }],
+      portions: donePortions,
+      originalAmount: 205.2, finalAmount: 143.64, savingAmount: 61.56, totalQuantity: 12,
+      discountReason: '临期鲜食优先调拨：覆盖 12 份团餐主食，0.7 折。全部批次经团餐时间核验，送达时仍保留 ≥2 小时食用窗口；为减少门店临期报损而折价，餐食仍在保质期内，非质量问题。',
+      tempControl: {
+        zones: ['HOT'], requirement: '热链鲜食全程保温配送，门店出餐中心温度 ≥60℃',
+        box: '热链保温箱（箱内 ≥60℃）', deliverTemp: '送达中心温度 ≥55℃', eatBeforeHours: 2,
+        note: '送达后请按标示温度暂存，并于 2 小时食用窗口内食用完毕',
+      },
+      afterSalesRules: offerRules(0.7),
+      mealTimeCheck: {
+        deliverAt: doneDeliverAt, eatWindowHours: 2, nearLookupHours: 6, passed: true,
+        lines: [{
+          productName: '田园时蔬素食便当', batchNo: fulfilledBatch.batchNo, sourceStoreName: stores[0].name,
+          expiresAt: doneExpire, remainHours: 2.5, ok: true, reason: '送达时仍有 2.5 小时食用窗口（要求 ≥2 小时）',
+        }],
+      },
+      transferIds: [], stockDeducted: true,
+      confirmedBy: cgUser.id, confirmedByName: '王芳', confirmedAt,
+      confirmationSnapshot: {
+        offerNo: 'NE-SEED-DONE', orderNo: doneOrder.orderNo, enterpriseId: ent1.id,
+        confirmedBy: cgUser.id, confirmedByName: '王芳', confirmedAt,
+        totalQuantity: 12, originalAmount: 205.2, finalAmount: 143.64, savingAmount: 61.56,
+        afterSalesRules: offerRules(0.7), settlementType: 'MONTHLY',
+      },
+      labelConfirmed: true, labelledBy: users[3].id, labelledAt: new Date(doneDeliverAt.getTime() - 45 * 60000),
+      labelNote: '已对 12 份临期餐食逐份贴标（含折扣原因与售后规则）',
+      fulfilledAt: new Date(doneDeliverAt.getTime() - 40 * 60000),
+    }));
+    await this.archiveRepo.save(this.archiveRepo.create({
+      orderId: doneOrder.id, enterpriseId: ent1.id, storeId: stores[0].id,
+      actualAmount: doneTotal, actualHeadcount: 12, returnCount: 0, returnAmount: 0,
+      nearExpiryUsed: 12, nearExpiryOfferCount: 1, nearExpiryDiscountAmount: 61.56,
+      compensation: 0, onTime: true, incidentCount: 0, invoiceErrors: 0, rating: 5,
+      items: doneItems, deliveredAt: new Date(doneDeliverAt.getTime() - 5 * 60000),
     }));
   }
 }

@@ -74,6 +74,170 @@
           </div>
         </div>
 
+        <div class="panel" v-if="offers.length">
+          <div class="panel-title">
+            临期鲜食优先调拨 · 折扣方案
+            <el-tag size="small" type="warning" effect="dark" style="margin-left:6px">企业确认 · 写入团餐单</el-tag>
+          </div>
+          <div v-for="f in offers" :key="f.id" class="offer-card">
+            <div class="offer-head">
+              <span class="mono">{{ f.offerNo }}</span>
+              <el-tag size="small" :type="OFFER_STATUS[f.status]?.type as any">{{ OFFER_STATUS[f.status]?.name }}</el-tag>
+              <span class="muted">{{ fmtTime(f.createdAt) }}</span>
+              <span v-if="f.recommendedByRole === 'STORE'" class="muted">门店推荐</span>
+              <span style="margin-left:auto" class="offer-saving">省 {{ fmtMoney(f.savingAmount) }}</span>
+            </div>
+
+            <!-- 团餐时间核验 -->
+            <el-alert
+              :type="f.mealTimeCheck?.passed ? 'success' : 'warning'" :closable="false" show-icon
+              :title="`团餐时间核验：${f.mealTimeCheck?.passed ? '通过' : '部分覆盖'}（送达 ${fmtTime(f.mealTimeCheck?.deliverAt)} 后保留 ${f.mealTimeCheck?.eatWindowHours} 小时食用窗口）`"
+              style="margin:8px 0" />
+            <el-table :data="f.mealTimeCheck?.lines || []" size="small" border style="margin-bottom:8px">
+              <el-table-column prop="productName" label="商品" min-width="130" />
+              <el-table-column prop="batchNo" label="批次号" width="110" class-name="mono" />
+              <el-table-column prop="sourceStoreName" label="批次来源门店" min-width="140" />
+              <el-table-column label="到期时间" width="145">
+                <template #default="{ row }">{{ row.expiresAt ? fmtTime(row.expiresAt) : '—' }}</template>
+              </el-table-column>
+              <el-table-column label="送达后剩余" width="100" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.ok" size="small" type="success">{{ row.remainHours }}h</el-tag>
+                  <el-tag v-else size="small" type="danger">不足</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="reason" label="核验结论" min-width="160" show-overflow-tooltip />
+            </el-table>
+
+            <!-- 批次/折扣 -->
+            <el-table :data="f.items" size="small" border>
+              <el-table-column prop="name" label="临期商品" min-width="130" />
+              <el-table-column prop="batchNo" label="生产批次" width="105" class-name="mono" />
+              <el-table-column label="来源" min-width="130">
+                <template #default="{ row }">
+                  {{ row.sourceStoreName }}
+                  <el-tag v-if="row.crossStore" size="small" type="danger" effect="plain" style="margin-left:4px">跨店调拨</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="quantity" label="数量" width="60" align="center" />
+              <el-table-column label="温控" width="64" align="center">
+                <template #default="{ row }">{{ TEMP_ZONE_NAME[row.tempZone] }}</template>
+              </el-table-column>
+              <el-table-column label="合同价" width="80" align="right">
+                <template #default="{ row }">{{ fmtMoney(row.unitPrice) }}</template>
+              </el-table-column>
+              <el-table-column label="折扣" width="70" align="center">
+                <template #default="{ row }">
+                  <el-tag size="small" type="warning" effect="dark">{{ Math.round(row.discountRate * 10) }}折</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="折后单价" width="86" align="right">
+                <template #default="{ row }">{{ fmtMoney(row.discountPrice) }}</template>
+              </el-table-column>
+              <el-table-column label="小计" width="90" align="right">
+                <template #default="{ row }">
+                  <span class="muted" style="text-decoration:line-through">{{ fmtMoney(row.lineOriginal) }}</span>
+                  <b class="danger-text"> {{ fmtMoney(row.lineFinal) }}</b>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div class="offer-amount">
+              原价 {{ fmtMoney(f.originalAmount) }} → 折后 <b class="danger-text">{{ fmtMoney(f.finalAmount) }}</b>
+              ，共 {{ f.totalQuantity }} 份，为企业节省 <b class="ok-text">{{ fmtMoney(f.savingAmount) }}</b>
+            </div>
+
+            <!-- 折扣原因 -->
+            <div class="offer-reason">
+              <span class="reason-k">折扣原因（企业可见）：</span>{{ f.discountReason }}
+            </div>
+
+            <!-- 温控 -->
+            <div class="offer-rules">
+              <div class="sub-title">温控要求（写入团餐单）</div>
+              <el-descriptions :column="2" border size="small">
+                <el-descriptions-item label="温控方式">{{ f.tempControl?.requirement }}</el-descriptions-item>
+                <el-descriptions-item label="保温箱">{{ f.tempControl?.box }}</el-descriptions-item>
+                <el-descriptions-item label="到货温度">{{ f.tempControl?.deliverTemp }}</el-descriptions-item>
+                <el-descriptions-item label="食用时限">送达后 {{ f.tempControl?.eatBeforeHours }} 小时内食用</el-descriptions-item>
+              </el-descriptions>
+              <div class="muted" style="font-size:12px; margin-top:4px">{{ f.tempControl?.note }}</div>
+            </div>
+
+            <!-- 售后责任规则 -->
+            <div class="offer-rules">
+              <div class="sub-title">售后责任规则（企业确认后生效，进入月结附件与售后说明）</div>
+              <div v-for="(r, i) in f.afterSalesRules" :key="i" class="rule-line">{{ r }}</div>
+            </div>
+
+            <!-- 跨店调拨留痕 -->
+            <div v-if="f.transfers?.length" class="offer-rules">
+              <div class="sub-title">跨店调拨留痕（{{ f.transfers.length }}）</div>
+              <el-table :data="f.transfers" size="small" border>
+                <el-table-column prop="id" label="调拨单号" width="90" />
+                <el-table-column prop="quantity" label="数量" width="70" align="center" />
+                <el-table-column prop="reason" label="调拨原因" min-width="180" show-overflow-tooltip />
+                <el-table-column label="状态" width="90">
+                  <template #default>已接收并入履约门店</template>
+                </el-table-column>
+              </el-table>
+            </div>
+
+            <!-- 逐份餐食标记 -->
+            <div v-if="f.portions?.length" class="offer-rules">
+              <div class="sub-title">
+                逐份餐食标记（{{ f.portions.length }} 份，标记到每份餐食，企业端可见折扣原因与售后规则）
+                <el-button link type="primary" size="small" @click="togglePortions(f)">
+                  {{ portionExpanded[f.id] ? '收起' : `查看 ${f.portions.length} 枚标签` }}
+                </el-button>
+              </div>
+              <div v-if="portionExpanded[f.id]" class="portion-box">
+                <el-tooltip v-for="p in f.portions" :key="p.code" placement="top" :show-after="150">
+                  <template #content>
+                    <div style="max-width:320px; line-height:1.7">
+                      <div>批次 {{ p.batchNo }} · {{ TEMP_ZONE_NAME[p.tempZone] }} · 到期 {{ fmtTime(p.expiresAt) }}</div>
+                      <div>建议食用前 {{ fmtTime(p.eatBefore) }}</div>
+                      <div>{{ p.discountReason }}</div>
+                    </div>
+                  </template>
+                  <el-tag size="small" type="warning" effect="dark" style="margin:2px">{{ p.code }}</el-tag>
+                </el-tooltip>
+              </div>
+            </div>
+
+            <!-- 企业确认快照 -->
+            <div v-if="f.status === 'CONFIRMED' || f.status === 'FULFILLED'" class="confirm-box">
+              <el-icon style="color:#67c23a"><CircleCheckFilled /></el-icon>
+              <div>
+                <b>企业已确认并保留确认记录</b>：{{ f.confirmedByName }} 于 {{ fmtTime(f.confirmedAt) }} 确认。
+                商品批次、折扣、温控、售后责任已写入团餐单，确认快照随月结附件与售后说明留存，
+                后续售后不得把临期误认为质量问题（真实食安问题仍可正常维权）。
+                <div v-if="f.labelConfirmed" class="ok-text" style="margin-top:2px">
+                  门店逐份贴标：{{ f.labelNote }}（{{ fmtTime(f.labelledAt) }}）
+                </div>
+              </div>
+            </div>
+            <div v-else-if="f.status === 'REJECTED'" class="reject-box">
+              企业未接受：{{ f.rejectReason }} · {{ fmtTime(f.rejectedAt) }}
+            </div>
+
+            <!-- 操作 -->
+            <div class="offer-actions">
+              <template v-if="f.status === 'PROPOSED'">
+                <template v-if="auth.role === 'ENTERPRISE'">
+                  <el-button size="small" type="primary" @click="confirmOffer(f)">
+                    接受折扣方案（确认批次/折扣/温控/售后责任，省 {{ fmtMoney(f.savingAmount) }}）
+                  </el-button>
+                  <el-button size="small" @click="rejectOffer(f)">不接受，按正常批次供应</el-button>
+                </template>
+                <el-alert v-else type="info" :closable="false" show-icon
+                  title="等待企业行政确认，确认前不锁定库存、不影响正常备货" style="padding:4px 10px" />
+              </template>
+              <el-button v-if="auth.role === 'STORE' && f.storeId === auth.user?.storeId && f.status === 'CONFIRMED'"
+                size="small" type="warning" @click="openOfferLabel(f)">逐份贴标确认</el-button>
+            </div>
+          </div>
+        </div>
+
         <div class="panel" v-if="o.topUps?.length">
           <div class="panel-title">
             临时加餐记录
@@ -160,6 +324,10 @@
             </el-descriptions-item>
             <el-descriptions-item label="退货">{{ o.archive.returnCount }} 份 / {{ fmtMoney(o.archive.returnAmount) }}</el-descriptions-item>
             <el-descriptions-item label="临期消化">{{ o.archive.nearExpiryUsed }} 份</el-descriptions-item>
+            <el-descriptions-item label="临期折扣方案">{{ o.archive.nearExpiryOfferCount || 0 }} 单</el-descriptions-item>
+            <el-descriptions-item label="临期折扣让利">
+              <span class="ok-text">{{ fmtMoney(o.archive.nearExpiryDiscountAmount) }}</span>
+            </el-descriptions-item>
             <el-descriptions-item label="赔付">{{ fmtMoney(o.archive.compensation) }}</el-descriptions-item>
             <el-descriptions-item label="售后次数">{{ o.archive.incidentCount }}</el-descriptions-item>
             <el-descriptions-item label="发票错误">{{ o.archive.invoiceErrors }}</el-descriptions-item>
@@ -194,9 +362,13 @@
             <template v-if="auth.role === 'STORE'">
               <el-button v-if="o.status === 'CONFIRMED'" type="primary" @click="doPrepare">开始备货</el-button>
               <el-button v-if="['PREPARING', 'CONFIRMED'].includes(o.status)" type="success" @click="doReady">备货完成，通知取货</el-button>
+              <el-button v-if="['CONFIRMED', 'PREPARING'].includes(o.status) && canRecommend" type="warning" plain
+                @click="doRecommend">临期鲜食优先调拨 · 推荐折扣</el-button>
             </template>
             <el-button v-if="['SERVICE', 'ADMIN', 'ENTERPRISE', 'STORE', 'FINANCE'].includes(auth.role)"
               type="warning" plain @click="incidentVisible = true">上报异常</el-button>
+            <el-button v-if="['SERVICE', 'ADMIN'].includes(auth.role) && ['CONFIRMED','PREPARING'].includes(o.status) && canRecommend"
+              type="warning" plain @click="doRecommend">平台推荐临期折扣</el-button>
           </div>
         </div>
 
@@ -482,8 +654,7 @@
     </el-dialog>
 
     <!-- 门店贴标确认 -->
-    <el-dialog v-model="labelVisible" title="特殊餐重新贴标确认" width="460px">
-      <div v-if="labelTarget">
+    <el-dialog v-model="labelVisible" title="特殊餐重新贴标确认" width="460px">      <div v-if="labelTarget">
         <el-alert type="warning" :closable="false" show-icon
           title="请按企业名单逐份重新贴标，并核对拣货清单避免漏贴某一类特殊餐标" style="margin-bottom:12px" />
         <el-descriptions :column="1" border size="small">
@@ -501,6 +672,26 @@
       <template #footer>
         <el-button @click="labelVisible = false">取消</el-button>
         <el-button type="warning" @click="doLabel">已全部重新贴标，确认</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 临期折扣门店逐份贴标 -->
+    <el-dialog v-model="offerLabelVisible" title="临期餐食逐份贴标确认" width="480px">
+      <div v-if="offerLabelTarget">
+        <el-alert type="warning" :closable="false" show-icon
+          title="企业已确认折扣方案，请对每份临期餐食逐份贴「临期调拨」标签（含折扣原因、温控与售后规则），贴齐后确认。"
+          style="margin-bottom:12px" />
+        <el-descriptions :column="1" border size="small">
+          <el-descriptions-item label="折扣方案">{{ offerLabelTarget.offerNo }}</el-descriptions-item>
+          <el-descriptions-item label="应贴临期标签">{{ offerLabelTarget.totalQuantity }} 枚（每份 1 枚）</el-descriptions-item>
+          <el-descriptions-item label="温控要求">{{ offerLabelTarget.tempControl?.requirement }}</el-descriptions-item>
+        </el-descriptions>
+        <el-input v-model="offerLabelNote" type="textarea" :rows="2"
+          placeholder="贴标备注（可选）" style="margin-top:10px" />
+      </div>
+      <template #footer>
+        <el-button @click="offerLabelVisible = false">取消</el-button>
+        <el-button type="warning" @click="doOfferLabel">已逐份贴齐临期标记，确认</el-button>
       </template>
     </el-dialog>
 
@@ -523,6 +714,23 @@
         </el-form-item>
       </el-form>
 
+      <!-- 临期折扣售后防误判提示 -->
+      <el-alert v-if="selectedNearBatches.length" type="warning" :closable="false" show-icon
+        style="margin-bottom:10px"
+        title="所选批次属于您已确认的「临期鲜食折扣方案」">
+        <template #default>
+          <div v-for="h in selectedNearHits" :key="h.offerNo" style="line-height:1.8">
+            批次 <b class="mono">{{ h.batchNo }}</b> 命中方案 <b class="mono">{{ h.offerNo }}</b>
+            （{{ Math.round(h.discountRate * 10) }} 折，{{ h.confirmedBy }} 于 {{ fmtTime(h.confirmedAt) }} 确认）。
+            临期为保质期内折价、<b>非质量问题</b>，售后规则约定不得仅凭"临期/口感不及正价餐"按变质索赔；
+            如确有异味、变质、异物等真实食安问题，请勾选下方确认并附温控照片。
+          </div>
+          <el-checkbox v-model="spoiledForm.acknowledgeNearExpiry" style="margin-top:6px; font-weight:600">
+            已知晓临期折扣与售后规则，仍主张真实食品安全问题（由客服按温控照片/留样核查）
+          </el-checkbox>
+        </template>
+      </el-alert>
+
       <div class="sub-title">问题商品与批次</div>
       <el-table :data="spoiledForm.items" size="small" border>
         <el-table-column label="选择" width="50" align="center">
@@ -536,7 +744,7 @@
           <template #default="{ row }">
             <el-select v-model="row.batchId" size="small" filterable placeholder="选择批次" :disabled="!row.checked">
               <el-option v-for="b in spoiledBatches.filter((x:any)=>x.productId===row.productId)" :key="b.batchId"
-                :label="`${b.batchNo}（生产 ${fmtTime(b.producedAt)} / ${b.status==='DEPLETED'?'已售罄':b.quantity+'份在架'}）`" :value="b.batchId" />
+                :label="`${b.batchNo}（生产 ${fmtTime(b.producedAt)} / ${b.status==='DEPLETED'?'已售罄':b.quantity+'份在架'}${b.nearExpiryOffer ? ' / 已确认临期折扣' : ''}）`" :value="b.batchId" />
             </el-select>
           </template>
         </el-table-column>
@@ -587,7 +795,7 @@ import { useAuthStore } from '../stores/auth'
 import {
   ORDER_STATUS, ORDER_FLOW, OCCASIONS, CATEGORIES, INCIDENT_TYPES,
   INCIDENT_STATUS, DELIVERY_STATUS, INVOICE_STATUS, TOPUP_STATUS,
-  SPOILED_STATUS, REFUND_STATUS,
+  SPOILED_STATUS, REFUND_STATUS, OFFER_STATUS, TEMP_ZONE_NAME,
   ALLERGENS, fmtTime, fmtMoney,
 } from '../utils/dict'
 
@@ -631,8 +839,80 @@ const topUpDeadlineMin = computed(() => {
 const spoiledVisible = ref(false)
 const spoiledSubmitting = ref(false)
 const spoiledBatches = ref<any[]>([])
-const spoiledForm = reactive<any>({ issueType: 'SPOILED', deliveredAt: null, items: [], photos: [], diners: [{ name: '', phone: '', symptom: '' }], description: '' })
+const spoiledForm = reactive<any>({ issueType: 'SPOILED', deliveredAt: null, items: [], photos: [], diners: [{ name: '', phone: '', symptom: '' }], description: '', acknowledgeNearExpiry: false })
 const spoiledReports = computed(() => o.value?.spoiledReports || [])
+
+// ===== 临期鲜食优先调拨折扣方案 =====
+const offers = computed<any[]>(() => o.value?.nearExpiryOffers || [])
+const portionExpanded = reactive<Record<number, boolean>>({})
+const offerLabelVisible = ref(false)
+const offerLabelTarget = ref<any>(null)
+const offerLabelNote = ref('')
+const liveOfferStatus = ['PROPOSED', 'CONFIRMED', 'FULFILLED']
+const canRecommend = computed(() =>
+  !offers.value.some((x: any) => liveOfferStatus.includes(x.status)))
+
+function togglePortions(f: any) {
+  portionExpanded[f.id] = !portionExpanded[f.id]
+}
+
+async function doRecommend() {
+  try {
+    await http.post(`/near-expiry/order/${id}/recommend`, {})
+    ElMessage.success('已生成临期折扣方案，等待企业行政确认')
+    load()
+  } catch { /* 错误已统一提示 */ }
+}
+
+async function confirmOffer(f: any) {
+  await ElMessageBox.confirm(
+    '确认后系统将锁定临期批次（周边门店批次会自动调拨入店）、按折后金额更新团餐单，并对每份餐食生成临期标记。企业确认将写入团餐单、月结附件与售后说明：临期为保质期内折价、非质量问题，真实食安问题仍可正常维权。',
+    `接受临期折扣方案 ${f.offerNo}（省 ${fmtMoney(f.savingAmount)}）`,
+    { type: 'warning', confirmButtonText: '我已阅读并确认接受' },
+  )
+  await http.post(`/near-expiry/offers/${f.id}/confirm`)
+  ElMessage.success('折扣方案已确认，批次/折扣/温控/售后责任已写入团餐单')
+  load()
+}
+
+async function rejectOffer(f: any) {
+  const { value } = await ElMessageBox.prompt('不接受原因（可选）', '按正常批次供应', {
+    confirmButtonText: '确认不接受', inputValue: '希望使用正价新鲜批次',
+  }).catch(() => ({ value: null }))
+  if (value === null) return
+  await http.post(`/near-expiry/offers/${f.id}/reject`, { reason: value || '企业未接受' })
+  ElMessage.success('已拒绝，门店将按正常批次备货')
+  load()
+}
+
+function openOfferLabel(f: any) {
+  offerLabelTarget.value = f
+  offerLabelNote.value = ''
+  offerLabelVisible.value = true
+}
+
+async function doOfferLabel() {
+  await http.post(`/near-expiry/offers/${offerLabelTarget.value.id}/label`, {
+    labelledQty: offerLabelTarget.value.totalQuantity, note: offerLabelNote.value,
+  })
+  ElMessage.success('已逐份贴齐临期标记，企业端可查看折扣原因与售后规则')
+  offerLabelVisible.value = false
+  load()
+}
+
+// 售后弹窗中所选批次命中的临期折扣方案（context 的批次带 nearExpiryOffer）
+const selectedNearHits = computed(() => {
+  const hits: any[] = []
+  for (const i of spoiledForm.items) {
+    if (!i.checked || !i.batchId) continue
+    const b = spoiledBatches.value.find((x: any) => x.batchId === i.batchId)
+    if (b?.nearExpiryOffer && !hits.some(h => h.offerNo === b.nearExpiryOffer.offerNo && h.batchNo === b.batchNo)) {
+      hits.push(b.nearExpiryOffer)
+    }
+  }
+  return hits
+})
+const selectedNearBatches = computed(() => selectedNearHits.value)
 
 async function openSpoiled() {
   const ctx: any = await http.get(`/spoiled/context/${id}`)
@@ -643,6 +923,7 @@ async function openSpoiled() {
   spoiledForm.photos = [{ fileName: '', surfaceTemp: null, coreTemp: null, takenAt: new Date(), note: '' }]
   spoiledForm.diners = [{ name: '', phone: '', symptom: '' }]
   spoiledForm.description = ''
+  spoiledForm.acknowledgeNearExpiry = false
   spoiledVisible.value = true
 }
 
@@ -652,6 +933,10 @@ async function submitSpoiled() {
     .map((i: any) => ({ productId: i.productId, name: i.name, batchId: i.batchId, qty: i.qty, issueType: spoiledForm.issueType }))
   if (!items.length) { ElMessage.warning('请勾选至少一种问题商品'); return }
   if (items.some((i: any) => !i.batchId)) { ElMessage.warning('请为每种问题商品选择生产批次'); return }
+  if (selectedNearHits.value.length && !spoiledForm.acknowledgeNearExpiry) {
+    ElMessage.warning('所选批次属已确认临期折扣方案，请勾选「仍主张真实食安问题」后再提交')
+    return
+  }
   const photos = spoiledForm.photos.filter((p: any) => p.fileName)
   const diners = spoiledForm.diners.filter((p: any) => p.name)
   spoiledSubmitting.value = true
@@ -659,6 +944,7 @@ async function submitSpoiled() {
     await http.post('/spoiled/reports', {
       orderId: id, issueType: spoiledForm.issueType, deliveredAt: spoiledForm.deliveredAt,
       items, photos, diners, description: spoiledForm.description,
+      acknowledgeNearExpiry: spoiledForm.acknowledgeNearExpiry,
     })
     ElMessage.success('食安售后已提交，客服将立即受理')
     spoiledVisible.value = false
@@ -849,4 +1135,16 @@ onMounted(load)
 .spoiled-row { display:flex; align-items:center; gap:10px; padding:8px 6px; border-bottom:1px solid #f2f3f5; cursor:pointer; font-size:13px; }
 .spoiled-row:hover { background:#f7f8fa; }
 .photo-edit-row { display:flex; gap:8px; align-items:center; margin:6px 0; }
+.offer-card { border: 1px solid #f0d9a8; border-radius: 8px; padding: 12px; margin-bottom: 12px; background: #fefbf4; }
+.offer-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.offer-saving { font-weight: 700; color: #67c23a; }
+.offer-amount { margin-top: 8px; font-size: 13px; line-height: 1.8; }
+.offer-reason { margin-top: 8px; padding: 8px 10px; background: #fff; border-left: 3px solid #e6a23c; border-radius: 4px; font-size: 13px; color: #5c4419; line-height: 1.7; }
+.reason-k { font-weight: 700; color: #b88230; }
+.offer-rules { margin-top: 10px; }
+.rule-line { font-size: 12.5px; color: #4c4d4f; line-height: 1.75; padding: 2px 0; }
+.offer-actions { margin-top: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.confirm-box { margin-top: 10px; padding: 10px; background: #f0f9eb; border: 1px solid #b3e19d; border-radius: 6px; display: flex; gap: 8px; font-size: 12.5px; line-height: 1.7; color: #3a5c23; }
+.reject-box { margin-top: 10px; padding: 8px 10px; background: #f4f4f5; border-radius: 6px; font-size: 12.5px; color: #909399; }
+.portion-box { background: #fff; border: 1px dashed #e6a23c; border-radius: 6px; padding: 8px; max-height: 180px; overflow-y: auto; }
 </style>

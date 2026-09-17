@@ -11,6 +11,7 @@ import { Archive, Feedback } from '../../entities/archive.entity';
 import { User, UserRole } from '../../entities/user.entity';
 import { MealTopUp } from '../../entities/topup.entity';
 import { SpoiledReport } from '../../entities/spoiled.entity';
+import { NearExpiryOffer } from '../../entities/near-expiry.entity';
 import { PlanService } from './plan.service';
 import { NotificationService } from '../notification/notification.service';
 
@@ -31,6 +32,7 @@ export class OrderService {
     @InjectRepository(User) private userRepo: Repository<User>,
     @InjectRepository(MealTopUp) private topUpRepo: Repository<MealTopUp>,
     @InjectRepository(SpoiledReport) private spoiledRepo: Repository<SpoiledReport>,
+    @InjectRepository(NearExpiryOffer) private offerRepo: Repository<NearExpiryOffer>,
     private planService: PlanService,
     private notify: NotificationService,
     private dataSource: DataSource,
@@ -131,6 +133,7 @@ export class OrderService {
     const archive = await this.archiveRepo.findOne({ where: { orderId: id } });
     const topUps = await this.topUpRepo.find({ where: { orderId: id }, order: { id: 'DESC' } });
     const spoiledReports = await this.spoiledRepo.find({ where: { orderId: id }, order: { id: 'DESC' } });
+    const nearExpiryOffers = await this.offerRepo.find({ where: { orderId: id }, order: { id: 'DESC' } });
     let courierName: string = null;
     let extraCourierName: string = null;
     if (delivery?.courierId) {
@@ -152,6 +155,7 @@ export class OrderService {
       archive,
       topUps: topUps.filter(t => t.status !== 'CANCELLED'),
       spoiledReports,
+      nearExpiryOffers,
     };
   }
 
@@ -292,12 +296,23 @@ export class OrderService {
       list.push({ id: b.id, left: b.quantity, nearExpiry: b.expiresAt.getTime() <= nearLimit });
       pools.set(b.productId, list);
     }
+    // 已确认临期调拨折扣方案：批次在企业确认时已预扣，备货时跳过对应份数（避免二次扣库存）
+    const confirmedOffers = await this.offerRepo.find({ where: { orderId: id, status: 'CONFIRMED' } });
+    const coveredByProduct = new Map<number, number>();
+    for (const off of confirmedOffers) {
+      for (const it of off.items || []) {
+        coveredByProduct.set(it.productId, (coveredByProduct.get(it.productId) || 0) + it.quantity);
+      }
+    }
+
     const shortages: { name: string; lack: number }[] = [];
     const allocations: { batchId: number; use: number }[] = [];
     const nearUsedByProduct = new Map<number, number>();
     for (const item of plan.items as any[]) {
-      let remain = item.quantity;
-      let nearUsed = 0;
+      // 临期方案已预扣份数直接计入临期消化，仅对剩余份数核验正常批次
+      const covered = coveredByProduct.get(item.productId) || 0;
+      let remain = item.quantity - covered;
+      let nearUsed = covered;
       for (const p of pools.get(item.productId) || []) {
         if (remain <= 0) break;
         const use = Math.min(p.left, remain);
@@ -362,6 +377,14 @@ export class OrderService {
           .execute();
       }
       await em.save(plan);
+      // 已确认临期折扣方案随本次备货履约（批次库存确认时已预扣）
+      if (confirmedOffers.length) {
+        for (const off of confirmedOffers) {
+          off.status = 'FULFILLED';
+          off.fulfilledAt = new Date();
+          await em.save(off);
+        }
+      }
       order.status = OrderStatus.READY;
       await em.save(order);
 
@@ -490,6 +513,25 @@ export class OrderService {
     }
     const nearExpiryUsed = archiveItems.reduce((s: number, i: any) => s + (i.nearExpiryQty || 0), 0);
 
+    // 企业已确认的临期调拨折扣方案（进入交付档案 + 后续月结附件/售后说明）
+    const offers = await this.offerRepo.find({
+      where: { orderId: order.id, status: In(['CONFIRMED', 'FULFILLED']) },
+    });
+    const nearExpiryDiscountAmount = Math.round(
+      offers.reduce((s, o) => s + Number(o.savingAmount || 0), 0) * 100) / 100;
+    const offerSummary = offers.map(o => ({
+      offerNo: o.offerNo,
+      totalQuantity: o.totalQuantity,
+      originalAmount: Number(o.originalAmount),
+      finalAmount: Number(o.finalAmount),
+      savingAmount: Number(o.savingAmount),
+      discountReason: o.discountReason,
+      afterSalesRules: o.afterSalesRules,
+      confirmedByName: o.confirmedByName,
+      confirmedAt: o.confirmedAt,
+      portionCount: (o.portions || []).length,
+    }));
+
     const archive = this.archiveRepo.create({
       orderId: order.id,
       enterpriseId: order.enterpriseId,
@@ -499,6 +541,8 @@ export class OrderService {
       returnCount,
       returnAmount,
       nearExpiryUsed,
+      nearExpiryOfferCount: offers.length,
+      nearExpiryDiscountAmount,
       compensation,
       onTime,
       incidentCount: incidents.length,

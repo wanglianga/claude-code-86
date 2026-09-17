@@ -13,6 +13,7 @@ import { Archive, Feedback } from '../../entities/archive.entity';
 import { Delivery } from '../../entities/delivery.entity';
 import { User, UserRole, ROLE_NAMES } from '../../entities/user.entity';
 import { NotificationService } from '../notification/notification.service';
+import { NearExpiryService } from '../near-expiry/near-expiry.service';
 
 /** 下架任务处理时限（小时） */
 const RECALL_DEADLINE_HOURS = 2;
@@ -41,6 +42,7 @@ export class SpoiledService {
     @InjectRepository(Feedback) private feedbackRepo: Repository<Feedback>,
     @InjectRepository(Delivery) private deliveryRepo: Repository<Delivery>,
     @InjectRepository(User) private userRepo: Repository<User>,
+    private nearExpiry: NearExpiryService,
     private notify: NotificationService,
   ) {}
 
@@ -79,6 +81,10 @@ export class SpoiledService {
     });
     const products = await this.productRepo.find();
     const pmap = new Map(products.map(p => [p.id, p]));
+    const nearExpiryHits = await this.nearExpiry.matchBatch(
+      orderId, batches.map(b => b.id),
+    );
+    const hitBatchNos = new Set(nearExpiryHits.map((h: any) => h.batchNo));
     return {
       order: {
         id: order.id, orderNo: order.orderNo, status: order.status,
@@ -94,7 +100,11 @@ export class SpoiledService {
         productName: pmap.get(b.productId)?.name,
         producedAt: b.producedAt, expiresAt: b.expiresAt,
         quantity: b.quantity, tempZone: b.tempZone, status: b.status,
+        nearExpiryOffer: hitBatchNos.has(b.batchNo)
+          ? nearExpiryHits.find((h: any) => h.batchNo === b.batchNo)
+          : null,
       })),
+      nearExpiryHits,
     };
   }
 
@@ -119,6 +129,17 @@ export class SpoiledService {
     const batches = await this.batchRepo.find({ where: { id: In(items.map(i => +i.batchId).filter(Boolean)) } });
     const bmap = new Map(batches.map(b => [b.id, b]));
     const delivery = await this.deliveryRepo.findOne({ where: { orderId: order.id } });
+
+    // 售后防误判：所选批次若属于企业已确认的临期调拨折扣方案，
+    // 必须显式勾选「知晓临期折扣、仍主张真实食安问题」方可受理，避免把临期误认为质量问题。
+    const nearHits = await this.nearExpiry.matchBatch(order.id, batches.map(b => b.id));
+    if (nearHits.length && !dto.acknowledgeNearExpiry) {
+      throw new BadRequestException(
+        `所选批次 ${nearHits.map((h: any) => h.batchNo).join('、')} 属于企业已确认的临期鲜食折扣方案（${nearHits.map((h: any) => h.offerNo).join('、')}）：`
+        + `临期为保质期内折价、非质量问题，售后规则约定不得仅凭"临期/口感不及正价餐"按变质索赔。`
+        + `如确有异味、变质、异物等真实食品安全问题，请勾选「已知晓临期折扣，仍主张真实食安问题」后重新提交，并附温控照片与食用人员。`,
+      );
+    }
 
     const fullItems = items.map((i: any) => {
       const p = pmap.get(+i.productId);
@@ -149,6 +170,17 @@ export class SpoiledService {
       status: 'OPEN',
       refundMultiplier: +dto.refundMultiplier || 2,
       createdBy: user.id,
+      nearExpiryNotice: nearHits.length ? {
+        matched: true,
+        acknowledged: true,
+        offers: nearHits.map((h: any) => ({
+          offerId: h.offerId, offerNo: h.offerNo, batchNo: h.batchNo, productName: h.productName,
+          discountRate: h.discountRate, confirmedBy: h.confirmedBy, confirmedAt: h.confirmedAt,
+          portionCodes: h.portionCodes, discountReason: h.discountReason,
+          afterSalesRules: h.afterSalesRules,
+        })),
+        notice: '本单批次属企业已确认临期调拨折扣方案，企业已勾选「知晓临期折扣、仍主张真实食安问题」；客服需依据温控照片/食用人员/留样核查，临期定性本身不构成质量问题。',
+      } : { matched: false, acknowledged: false, offers: [] },
     });
     const saved = await this.reportRepo.save(report);
 
@@ -172,6 +204,11 @@ export class SpoiledService {
     saved.incidentId = incident.id;
     await this.reportRepo.save(saved);
     await this.incidentLog(incident.id, user, 'CREATED', `企业提交变质售后单 ${saved.reportNo}（批次/签收时间/温控照片/食用人员已收集）`);
+    if (nearHits.length) {
+      await this.incidentLog(incident.id, user, 'COMMENT',
+        `【临期折扣售后提示】问题批次命中企业已确认的临期调拨折扣方案 ${nearHits.map((h: any) => `${h.offerNo}(${h.batchNo})`).join('、')}，`
+        + `企业已勾选知晓临期折扣、仍主张真实食安问题。请客服依据温控照片、食用人员症状与门店留样核查：若仅为临期/口感问题不构成质量问题，按售后规则说明并可驳回；若确认真实变质/异味，临期折扣不免责，正常按食安流程退款/补送/下架。企业确认快照见团餐单与月结附件。`);
+    }
 
     order.hasException = true;
     await this.orderRepo.save(order);

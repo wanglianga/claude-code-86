@@ -1,11 +1,13 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository, IsNull, In } from 'typeorm';
 import { Invoice, Settlement } from '../../entities/finance.entity';
 import { MealOrder, OrderStatus } from '../../entities/order.entity';
 import { Enterprise, Contract } from '../../entities/enterprise.entity';
 import { Archive } from '../../entities/archive.entity';
 import { Incident } from '../../entities/incident.entity';
+import { NearExpiryOffer } from '../../entities/near-expiry.entity';
+import { Store } from '../../entities/store.entity';
 import { User, UserRole } from '../../entities/user.entity';
 import { NotificationService } from '../notification/notification.service';
 
@@ -19,6 +21,8 @@ export class FinanceService {
     @InjectRepository(Contract) private contractRepo: Repository<Contract>,
     @InjectRepository(Archive) private archiveRepo: Repository<Archive>,
     @InjectRepository(Incident) private incidentRepo: Repository<Incident>,
+    @InjectRepository(NearExpiryOffer) private offerRepo: Repository<NearExpiryOffer>,
+    @InjectRepository(Store) private storeRepo: Repository<Store>,
     private notify: NotificationService,
   ) {}
 
@@ -104,10 +108,48 @@ export class FinanceService {
     }
     settlement.orderCount = inMonth.length;
     settlement.totalAmount = Math.round(inMonth.reduce((s, o) => s + Number(o.actualAmount ?? o.totalAmount), 0) * 100) / 100;
+
+    // 月结附件：归集账期内企业已确认的临期调拨折扣方案（企业确认凭据，随账期留存）
+    const offers = inMonth.length
+      ? await this.offerRepo.find({
+        where: {
+          enterpriseId,
+          status: In(['CONFIRMED', 'FULFILLED']),
+        },
+      })
+      : [];
+    const stores = await this.storeRepo.find();
+    const smap = new Map(stores.map(s => [s.id, s.name]));
+    const monthOrderIds = new Set(inMonth.map(o => o.id));
+    const attachments = offers
+      .filter(o => monthOrderIds.has(o.orderId))
+      .map(o => ({
+        offerId: o.id,
+        offerNo: o.offerNo,
+        orderId: o.orderId,
+        storeId: o.storeId,
+        storeName: smap.get(o.storeId),
+        quantity: o.totalQuantity,
+        originalAmount: Number(o.originalAmount),
+        finalAmount: Number(o.finalAmount),
+        savingAmount: Number(o.savingAmount),
+        discountReason: o.discountReason,
+        tempControl: o.tempControl,
+        afterSalesRules: o.afterSalesRules,
+        portionCount: (o.portions || []).length,
+        confirmedBy: o.confirmedBy,
+        confirmedByName: o.confirmedByName,
+        confirmedAt: o.confirmedAt,
+      }));
+    settlement.attachments = attachments;
     const saved = await this.settlementRepo.save(settlement);
     for (const o of inMonth) {
       o.settlementId = saved.id;
       await this.orderRepo.save(o);
+    }
+    for (const o of offers.filter(x => monthOrderIds.has(x.orderId))) {
+      o.attachedSettlementId = saved.id;
+      await this.offerRepo.save(o);
     }
     return saved;
   }

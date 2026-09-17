@@ -5,11 +5,13 @@ import { MealOrder } from '../../entities/order.entity';
 import { Enterprise, Contract } from '../../entities/enterprise.entity';
 import { Archive } from '../../entities/archive.entity';
 import { Incident } from '../../entities/incident.entity';
+import { NearExpiryOffer } from '../../entities/near-expiry.entity';
+import { Store } from '../../entities/store.entity';
 import { FinanceService } from './finance.service';
 import { FinanceController } from './finance.controller';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Invoice, Settlement, MealOrder, Enterprise, Contract, Archive, Incident])],
+  imports: [TypeOrmModule.forFeature([Invoice, Settlement, MealOrder, Enterprise, Contract, Archive, Incident, NearExpiryOffer, Store])],
   providers: [FinanceService],
   controllers: [FinanceController],
 })

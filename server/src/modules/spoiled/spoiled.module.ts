@@ -13,13 +13,14 @@ import { Delivery } from '../../entities/delivery.entity';
 import { User } from '../../entities/user.entity';
 import { SpoiledService } from './spoiled.service';
 import { SpoiledController } from './spoiled.controller';
+import { NearExpiryModule } from '../near-expiry/near-expiry.module';
 
 @Module({
   imports: [TypeOrmModule.forFeature([
     SpoiledReport, BatchRecall, RecallTask, Redelivery,
     MealOrder, MealPlan, InventoryBatch, Product, Store,
     Incident, IncidentLog, Archive, Feedback, Delivery, User,
-  ])],
+  ]), NearExpiryModule],
   providers: [SpoiledService],
   controllers: [SpoiledController],
   exports: [SpoiledService],

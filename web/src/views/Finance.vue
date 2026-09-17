@@ -55,9 +55,11 @@
                 <el-tag size="small" :type="SETTLEMENT_STATUS[row.status]?.type as any">{{ SETTLEMENT_STATUS[row.status]?.name }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="260" align="center">
+            <el-table-column label="操作" width="320" align="center">
               <template #default="{ row }">
                 <el-button size="small" @click="viewOrders(row)">明细</el-button>
+                <el-button v-if="row.attachments?.length" size="small" type="warning" plain
+                  @click="viewAttachments(row)">月结附件（{{ row.attachments.length }}）</el-button>
                 <el-button v-if="auth.role === 'ENTERPRISE' && row.status === 'OPEN'" size="small" type="primary"
                   @click="confirm(row)">确认账单</el-button>
                 <el-button v-if="['FINANCE', 'ADMIN'].includes(auth.role) && row.status === 'CONFIRMED'"
@@ -98,6 +100,53 @@
         </el-table-column>
       </el-table>
     </el-dialog>
+
+    <!-- 月结附件：企业确认的临期调拨折扣方案 -->
+    <el-dialog v-model="attachVisible" title="月结附件 · 临期鲜食调拨企业确认" width="860px" top="6vh">
+      <el-alert type="warning" :closable="false" show-icon
+        title="以下为账期内企业行政已确认的临期鲜食优先调拨折扣方案，含批次、折扣、温控与售后责任，作为月结与售后责任界定凭据：临期为保质期内折价、非质量问题。"
+        style="margin-bottom:12px" />
+      <el-table :data="attachments" size="small" border max-height="420">
+        <el-table-column prop="offerNo" label="方案号" width="140" class-name="mono" />
+        <el-table-column label="团餐单" width="130">
+          <template #default="{ row }">
+            <el-link type="primary" @click="$router.push(`/orders/${row.orderId}`)">{{ row.orderId }}</el-link>
+          </template>
+        </el-table-column>
+        <el-table-column prop="storeName" label="供餐门店" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="quantity" label="临期份数" width="80" align="center" />
+        <el-table-column label="原价" width="90" align="right">
+          <template #default="{ row }">{{ fmtMoney(row.originalAmount) }}</template>
+        </el-table-column>
+        <el-table-column label="折后" width="90" align="right">
+          <template #default="{ row }"><b class="danger-text">{{ fmtMoney(row.finalAmount) }}</b></template>
+        </el-table-column>
+        <el-table-column label="企业确认" min-width="170">
+          <template #default="{ row }">
+            <div>{{ row.confirmedByName }} · {{ fmtTime(row.confirmedAt) }}</div>
+            <div class="muted" style="font-size:12px">{{ row.portionCount }} 份逐份标记</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="折扣原因/售后规则" width="100" align="center">
+          <template #default="{ row }">
+            <el-button link type="primary" size="small" @click="viewAttachmentRules(row)">查看</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div style="margin-top:10px; text-align:right; font-size:13px">
+        临期调拨合计节省：<b class="ok-text">{{ fmtMoney(attachments.reduce((s:number,a:any)=>s+Number(a.savingAmount||0),0)) }}</b>
+      </div>
+    </el-dialog>
+
+    <!-- 附件条款详情 -->
+    <el-dialog v-model="rulesVisible" title="折扣原因 · 温控 · 售后责任规则" width="720px" append-to-body>
+      <div v-if="rulesTarget">
+        <div class="rules-reason"><b>折扣原因：</b>{{ rulesTarget.discountReason }}</div>
+        <div style="margin:8px 0"><b>温控要求：</b>{{ rulesTarget.tempControl?.requirement }}；{{ rulesTarget.tempControl?.deliverTemp }}；{{ rulesTarget.tempControl?.note }}</div>
+        <el-divider content-position="left">售后责任规则</el-divider>
+        <div v-for="(r,i) in rulesTarget.afterSalesRules" :key="i" style="line-height:1.9; font-size:13px">{{ r }}</div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -118,6 +167,10 @@ const reissueVisible = ref(false)
 const reissueForm = reactive<any>({ id: 0, title: '', taxNo: '' })
 const ordersVisible = ref(false)
 const settlementOrders = ref<any[]>([])
+const attachVisible = ref(false)
+const attachments = ref<any[]>([])
+const rulesVisible = ref(false)
+const rulesTarget = ref<any>(null)
 
 async function load() {
   invoices.value = await http.get('/finance/invoices')
@@ -176,6 +229,16 @@ async function pay(row: any) {
 async function viewOrders(row: any) {
   settlementOrders.value = await http.get(`/finance/settlements/${row.id}/orders`)
   ordersVisible.value = true
+}
+
+function viewAttachments(row: any) {
+  attachments.value = row.attachments || []
+  attachVisible.value = true
+}
+
+function viewAttachmentRules(row: any) {
+  rulesTarget.value = row
+  rulesVisible.value = true
 }
 
 onMounted(load)
